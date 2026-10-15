@@ -1,0 +1,485 @@
+<section class="chapter l3" id="ch-l3">
+<header class="ch-head">
+  <div class="ch-bignum">03</div>
+  <div class="ch-kicker">Lecture 3 · Sensors &amp; perception</div>
+  <h1>Sensor calibration</h1>
+  <p class="ch-sub">Camera intrinsics and distortion, stereo and epipolar geometry, camera–LiDAR extrinsics, camera–IMU time offset, and how to tell whether a calibration is actually right.</p>
+</header>
+<div class="glance">
+  <div><div class="gh">After this chapter you can</div><ul>
+    <li>project a 3-D point with the pinhole model and apply radial/tangential distortion</li>
+    <li>explain every step of Zhang's planar-target method and why tilted views matter</li>
+    <li>use $E$, $F$, rectification and $Z = fB/d$, and propagate disparity error to depth</li>
+    <li>estimate a camera–LiDAR rotation (SVD) and translation (linear LS) and spot degenerate setups</li>
+    <li>model gyro/accelerometer measurements, time offsets and rolling shutter; reason about observability</li>
+    <li>separate residual, accuracy and repeatability, and diagnose a bad calibration from its symptoms</li>
+  </ul></div>
+  <div><div class="gh">Slide map</div><ul class="slidemap">
+    <li><span>Overview: parameters, convention, LS</span><span class="sl">s1–4</span></li>
+    <li><span>Pinhole, distortion, targets, capture</span><span class="sl">s5–9</span></li>
+    <li><span>Zhang's method, reprojection error</span><span class="sl">s10–16</span></li>
+    <li><span>Stereo, epipolar, rectification, depth</span><span class="sl">s17–27</span></li>
+    <li><span>Camera–LiDAR</span><span class="sl">s28–34</span></li>
+    <li><span>Camera–IMU and temporal</span><span class="sl">s35–44</span></li>
+    <li><span>Validation, diagnostics, workflow</span><span class="sl">s45–55</span></li>
+  </ul></div>
+</div>
+
+<h2>What calibration estimates</h2>
+<p>Calibration turns sensor readings into geometrically meaningful numbers. For each problem, first separate the values you <b>fix</b> from the values you <b>estimate</b>:</p>
+<table class="tbl">
+  <tr><th style="width:22%">Problem</th><th>Main input</th><th style="width:34%">Estimated parameters</th></tr>
+  <tr><td><b>Camera intrinsic</b></td><td>pattern geometry, image features</td><td>intrinsic matrix $K$, distortion coefficients</td></tr>
+  <tr><td><b>Camera–camera</b></td><td>image pairs observed at the same time</td><td>relative rotation and translation</td></tr>
+  <tr><td><b>Camera–LiDAR</b></td><td>corresponding points or planes</td><td>relative rotation and translation</td></tr>
+  <tr><td><b>Camera–IMU / temporal</b></td><td>images, IMU data, timestamps</td><td>extrinsic and <b>time offset</b></td></tr>
+</table>
+<p>The pattern's pose in each image and the motion trajectory are usually estimated together with the calibration parameters, because they are needed to explain the observations — but they are <em>nuisance</em> variables, different in every image.</p>
+<div class="co key" data-t="Convention used throughout (slide 3)">
+<p>$T_{AB}$ converts <b>B coordinates into A coordinates</b>: $\mathbf{p}_A = R_{AB}\mathbf{p}_B + \mathbf{t}_{AB}$, $T_{AC} = T_{AB}T_{BC}$, $T_{BA} = T_{AB}^{-1}$ — exactly the convention of Lecture 2. The <b>pattern pose</b> $T_{CW,i}$ (W = pattern/world frame) changes from image to image; a <b>sensor extrinsic</b> such as $T_{C_2C_1}$ is the same in every image.</p>
+</div>
+
+<h3>Calibration is a least-squares problem</h3>
+<p>Every method in this lecture has the same skeleton: define the difference between an observation $\mathbf{z}_n$ and the model's prediction $h_n(\boldsymbol\theta)$, then minimize all residuals together:</p>
+$$\mathbf{e}_n(\boldsymbol\theta) = \mathbf{z}_n - h_n(\boldsymbol\theta), \qquad \hat{\boldsymbol\theta} = \argmin_{\boldsymbol\theta}\sum_n \mathbf{e}_n^\T\Sigma_n^{-1}\mathbf{e}_n$$
+<ul>
+<li>$\Sigma_n$ is the residual covariance: precise observations get more weight. With equal weights it is the ordinary sum of squared residuals.</li>
+<li>The problem is <b>nonlinear</b>, so it needs <b>initial values</b> — from a linear estimate or from geometry — and is then refined iteratively (Gauss–Newton / Levenberg–Marquardt, chapter 7).</li>
+<li>After optimization, <b>validate with separate data</b> (section 3.12).</li>
+</ul>
+
+<h2>The pinhole camera model</h2>
+<p>Transform a 3-D point into the camera frame, then divide by its depth:</p>
+<div class="side wide-r">
+<figure class="fig"><div class="panel">
+<svg class="dia" viewBox="0 0 420 220" width="420" height="220">
+  <defs><marker id="a6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#8a94a7"/></marker></defs>
+  <line x1="50" y1="100" x2="404" y2="100" stroke="#8a94a7" stroke-width="1.3" marker-end="url(#a6)"/>
+  <text x="392" y="90" class="m" style="fill:#a3acbd">Z<tspan class="sub" dy="3">C</tspan></text>
+  <line x1="50" y1="100" x2="50" y2="176" stroke="#8a94a7" stroke-width="1.3" marker-end="url(#a6)"/>
+  <text x="30" y="178" class="m" style="fill:#a3acbd">Y<tspan class="sub" dy="3">C</tspan></text>
+  <line x1="150" y1="28" x2="150" y2="182" stroke="#a78bfa" stroke-width="2.4"/>
+  <text x="156" y="38" class="lbl" style="fill:#a78bfa">image plane</text>
+  <line x1="50" y1="100" x2="360" y2="170" stroke="#fbbf24" stroke-width="1.4" stroke-dasharray="5 4"/>
+  <circle cx="360" cy="170" r="4.5" fill="#fbbf24"/>
+  <text x="300" y="196" class="m" style="fill:#fbbf24;font-size:13px">P = (X<tspan class="sub" dy="3">C</tspan><tspan dy="-3">, Y</tspan><tspan class="sub" dy="3">C</tspan><tspan dy="-3">, Z</tspan><tspan class="sub" dy="3">C</tspan><tspan dy="-3">)</tspan></text>
+  <line x1="360" y1="100" x2="360" y2="170" stroke="#fbbf24" stroke-width="1.2"/>
+  <text x="366" y="140" class="m" style="fill:#fbbf24;font-size:13px">Y<tspan class="sub" dy="3">C</tspan></text>
+  <circle cx="150" cy="122.6" r="4" fill="#a78bfa"/>
+  <line x1="150" y1="100" x2="150" y2="122.6" stroke="#f5f7fb" stroke-width="2"/>
+  <text x="158" y="128" class="m" style="font-size:13px">y = f Y<tspan class="sub" dy="3">C</tspan><tspan dy="-3"> / Z</tspan><tspan class="sub" dy="3">C</tspan></text>
+  <circle cx="150" cy="100" r="3" fill="#f5f7fb"/>
+  <text x="156" y="94" class="lbl">principal point</text>
+  <circle cx="50" cy="100" r="5" fill="#f5f7fb"/>
+  <text x="18" y="92" class="lbl">O (center)</text>
+  <line x1="50" y1="200" x2="150" y2="200" stroke="#6f7a8e"/><line x1="50" y1="195" x2="50" y2="205" stroke="#6f7a8e"/><line x1="150" y1="195" x2="150" y2="205" stroke="#6f7a8e"/>
+  <text x="96" y="216" class="m" style="font-size:13px">f</text>
+</svg></div>
+<figcaption>Side view. Similar triangles give $y/f = Y_C/Z_C$; the same holds for $x$. Depth is lost: every point on the dashed ray lands on the same pixel.</figcaption></figure>
+<div>
+$$u = f_x\frac{X_C}{Z_C} + c_x, \qquad v = f_y\frac{Y_C}{Z_C} + c_y$$
+$$K = \begin{bmatrix} f_x & 0 & c_x \\ 0 & f_y & c_y \\ 0 & 0 & 1 \end{bmatrix}$$
+<ul>
+<li>$f_x, f_y$: focal length <b>in pixels</b>; $c_x, c_y$: principal point.</li>
+<li>Valid only for $Z_C > 0$ (point in front of the camera), with skew = 0 and no distortion.</li>
+<li>Compactly, $\lambda\tilde{\mathbf{m}} = K\,\mathbf{p}_C$ with $\tilde{\mathbf{m}} = (u, v, 1)^\T$ and $\lambda = Z_C$.</li>
+</ul>
+</div>
+</div>
+<div class="co example" data-t="Worked example (slide 34 numbers)">
+<p>$\mathbf{p}_C = (1.0, 0.5, 5.0)$ m, $f_x = f_y = 800$, $c_x = 640$, $c_y = 360$: $u = 800 \cdot 1.0/5.0 + 640 = 800$, $v = 800 \cdot 0.5/5.0 + 360 = 440$ pixel. A point twice as far along the same ray, $(2.0, 1.0, 10.0)$, gives the same pixel.</p>
+</div>
+
+<h2>Lens distortion</h2>
+<p>Real lenses bend rays. The distortion is applied in <b>normalized coordinates</b> $x = X_C/Z_C$, $y = Y_C/Z_C$ (dimensionless), and only then mapped to pixels with $K$:</p>
+$$r^2 = x^2 + y^2, \qquad g(r) = 1 + k_1r^2 + k_2r^4 + k_3r^6$$
+$$x_d = x\,g(r) + 2p_1xy + p_2(r^2 + 2x^2), \qquad y_d = y\,g(r) + p_1(r^2 + 2y^2) + 2p_2xy$$
+<p>$k_1, k_2, k_3$ are <b>radial</b> coefficients (symmetric around the center); $p_1, p_2$ are <b>tangential</b> (lens not parallel to the sensor). Zhang's basic model uses only $k_1, k_2$ — do not raise the model order without a reason, because extra coefficients can fit noise and extrapolate badly near the image edge.</p>
+<figure class="fig"><div class="panel"><img src="fig/l3_distortion.svg" alt=""></div>
+<figcaption>Effect of the first radial coefficient. Negative $k_1$ pulls points toward the center (barrel, typical for wide-angle lenses); positive $k_1$ pushes them out (pincushion). The effect grows with $r^2$, so it is strongest at the image edge.</figcaption></figure>
+<div class="co example" data-t="Worked example · how far does distortion move a pixel?">
+<p>$x = 0.3$, $y = 0.2$, $k_1 = -0.25$, $k_2 = 0.05$, no tangential terms, $K$ as above.</p>
+<ol class="steps">
+<li>$r^2 = 0.09 + 0.04 = 0.13$, $g = 1 - 0.25(0.13) + 0.05(0.13)^2 = 0.968345$.</li>
+<li>$x_d = 0.29050$, $y_d = 0.19367$ → pixel $(872.4,\ 514.9)$.</li>
+<li>Without distortion the pixel would be $(880,\ 520)$: the point moved 7.6 px left and 5.1 px up, toward the center — barrel distortion.</li>
+</ol>
+</div>
+<p><b>Undistortion</b> is a different operation from estimation: it resamples the image (or the coordinates) using the estimated model. The corrected image can have a different output intrinsic matrix and valid area, so later projections must use the $K$ that belongs to that image. Fisheye lenses use a separate projection model based on the incidence angle.</p>
+<div class="co pitfall"><p>Do not blindly reuse the same parameters for raw and undistorted images, or after a crop/resize: the principal point shifts with cropping and $f_x, f_y, c_x, c_y$ all scale with resizing.</p></div>
+
+<h2>Targets and image capture</h2>
+<div class="figrow">
+<div>
+<p><b>Calibration targets</b> — detection stability and the accuracy of the printed dimensions directly affect the estimate:</p>
+<ul>
+<li><b>Checkerboard:</b> keep the corner-grid correspondence order consistent.</li>
+<li><b>ChArUco:</b> marker IDs plus chessboard corners — works when part of the board is hidden.</li>
+<li><b>AprilGrid:</b> good for partial views and pattern identification.</li>
+<li>Check the <b>flatness</b> of the board and its <b>actual printed size</b>.</li>
+</ul>
+</div>
+<div>
+<p><b>Image acquisition</b> — keep the camera settings fixed and vary the pattern's position, distance and orientation:</p>
+<ul>
+<li>cover the <b>edges</b> of the image, not only the center (that is where distortion lives);</li>
+<li>do not repeat only parallel poses — include <b>tilted</b> views;</li>
+<li>fix <b>focus, zoom and resolution</b>, and reduce motion blur.</li>
+</ul>
+</div>
+</div>
+
+<h2>Zhang's method, step by step</h2>
+<p>Zhang (2000) calibrates from several images of a <b>planar</b> pattern. Define the pattern plane as $Z_W = 0$; then the third column of the rotation drops out and projection becomes a 3×3 <b>homography</b>:</p>
+$$\lambda\tilde{\mathbf{m}} = K[\mathbf{r}_1\ \mathbf{r}_2\ \mathbf{t}]\,[X_W\ Y_W\ 1]^\T, \qquad H \sim K[\mathbf{r}_1\ \mathbf{r}_2\ \mathbf{t}]$$
+<ul>
+<li>$H$ has <b>8 degrees of freedom</b> (9 entries, defined only up to scale). Each point correspondence gives 2 equations → at least <b>4 points, no three collinear</b>.</li>
+<li>$Z_W = 0$ means the point lies on the pattern plane — not that its camera depth $Z_C$ is zero.</li>
+</ul>
+<h3>Constraints on the intrinsics</h3>
+<p>Write $H = [\mathbf{h}_1\ \mathbf{h}_2\ \mathbf{h}_3]$, so $\mathbf{r}_1 \propto K^{-1}\mathbf{h}_1$ and $\mathbf{r}_2 \propto K^{-1}\mathbf{h}_2$. The columns of a rotation matrix are orthogonal and of equal (unit) length:</p>
+$$B = K^{-\T}K^{-1}, \qquad \mathbf{h}_1^\T B\,\mathbf{h}_2 = 0, \qquad \mathbf{h}_1^\T B\,\mathbf{h}_1 = \mathbf{h}_2^\T B\,\mathbf{h}_2$$
+<p>$B$ is symmetric, so it has six independent entries $\mathbf{b} = [B_{11}, B_{12}, B_{22}, B_{13}, B_{23}, B_{33}]^\T$. Each constraint $\mathbf{h}_i^\T B\mathbf{h}_j$ is linear in $\mathbf{b}$: $\mathbf{h}_i^\T B\mathbf{h}_j = \mathbf{v}_{ij}^\T\mathbf{b}$ with</p>
+$$\mathbf{v}_{ij} = (h_{1i}h_{1j},\ h_{1i}h_{2j} + h_{2i}h_{1j},\ h_{2i}h_{2j},\ h_{3i}h_{1j} + h_{1i}h_{3j},\ h_{3i}h_{2j} + h_{2i}h_{3j},\ h_{3i}h_{3j})^\T$$
+<p>so every image contributes two rows, $V_k = [\mathbf{v}_{12},\ \mathbf{v}_{11} - \mathbf{v}_{22}]^\T$, and stacking all images gives</p>
+$$V\mathbf{b} = \mathbf{0}, \qquad \hat{\mathbf{b}} = \argmin_{\|\mathbf{b}\| = 1}\|V\mathbf{b}\|^2$$
+<p>solved by the <b>right singular vector of the smallest singular value</b> of $V$ (SVD). Five intrinsics (with skew) need <b>three or more independent images</b>; with only two, add a constraint such as skew = 0.</p>
+<h3>Recover K and the poses, then refine</h3>
+<ol class="steps" style="--c: var(--violet)">
+<li>Rebuild $B$ from $\mathbf{b}$, choosing the overall sign so that $B$ is positive definite. <b>Cholesky</b>: $B = LL^\T$, $\bar K = L^{-\T}$, $K = \bar K/\bar K_{33}$.</li>
+<li>Per image: $\lambda = 1/\|K^{-1}\mathbf{h}_1\|$, $\mathbf{r}_1 = \lambda K^{-1}\mathbf{h}_1$, $\mathbf{r}_2 = \lambda K^{-1}\mathbf{h}_2$, $\mathbf{t} = \lambda K^{-1}\mathbf{h}_3$, $\mathbf{r}_3 = \mathbf{r}_1 \times \mathbf{r}_2$. Noise makes this matrix not exactly a rotation: <b>project it onto SO(3)</b> and check that the depth is positive.</li>
+<li><b>Joint reprojection optimization</b> from these linear initial values — intrinsics, distortion and all pattern poses together:</li>
+</ol>
+$$\hat{\mathbf{m}}_{ij} = \pi_{K,\mathbf{d}}(R_i\mathbf{P}_j + \mathbf{t}_i), \qquad \min_{K,\,\mathbf{d},\,\{R_i, \mathbf{t}_i\}}\sum_{i,j}\|\mathbf{m}_{ij} - \hat{\mathbf{m}}_{ij}\|^2$$
+<p class="small">$i$: image, $j$: pattern feature, $\mathbf{P}_j$ known pattern coordinates, $\pi$ projection including distortion. $K$ and $\mathbf{d}$ are shared by all images; $(R_i, \mathbf{t}_i)$ map pattern coordinates into camera coordinates.</p>
+<div class="flow">
+  <div class="st"><b>1 · Detect</b>corners in every image (≥ 4 per view, not collinear)</div><div class="ar">›</div>
+  <div class="st"><b>2 · Homography</b>$H_i$ per image (linear, up to scale)</div><div class="ar">›</div>
+  <div class="st"><b>3 · Linear K</b>$V\mathbf{b} = 0$ by SVD, Cholesky → $K$</div><div class="ar">›</div>
+  <div class="st"><b>4 · Poses</b>$R_i, \mathbf{t}_i$ from $K^{-1}H_i$, projected onto SO(3)</div><div class="ar">›</div>
+  <div class="st"><b>5 · Refine</b>$K$, $\mathbf{d}$, all poses by nonlinear LS</div><div class="ar">›</div>
+  <div class="st"><b>6 · Validate</b>on images not used for fitting</div>
+</div>
+<div class="co intuition" data-t="Why linear first, nonlinear second?"><p>The reprojection cost is nonlinear and has local minima, so an iterative solver needs a good starting point. The linear steps ignore distortion and noise statistics but are closed-form and fast; the nonlinear refinement then gets the statistically right answer from a nearby start. You will see the same "initialize linearly, refine nonlinearly" pattern in camera–LiDAR calibration and pose graphs.</p></div>
+
+<h2>Reprojection error and pose diversity</h2>
+<p>The <b>reprojection error</b> is observation minus prediction in pixels. Keep the sign convention and the unit of the squared distance consistent.</p>
+<div class="co example" data-t="Worked example (slide 15)">
+<p>$\mathbf{m} = (800, 440)$, $\hat{\mathbf{m}} = (802, 439)$ → $\mathbf{e} = (-2, 1)$ pixel, $\|\mathbf{e}\|^2 = 5$ pixel², $\|\mathbf{e}\| = \sqrt5 \approx 2.24$ pixel.</p>
+$$\mathrm{RMS}_\text{point} = \sqrt{\frac{1}{N}\sum_{n=1}^{N}\|\mathbf{e}_n\|^2}$$
+<p>A per-coordinate RMS divides by $2N$ instead, so it is $\sqrt2$ smaller on the same data. With residuals $(-2, 1)$, $(1, 1)$, $(0, -2)$: per-point RMS $= \sqrt{(5 + 2 + 4)/3} = 1.91$ px, per-coordinate RMS $= \sqrt{11/6} = 1.35$ px. Always state which one you report.</p>
+</div>
+<p><b>Pose diversity and conditioning.</b> Without enough independent viewing directions the estimate is unstable even with many images. In Zhang's simulation (three images, noise σ = 0.5 px, 100 runs) the intrinsic error grows sharply as the angle between the pattern and the image plane goes to zero; at 5° about 40 % of the trials failed outright. A fronto-parallel board gives homographies that carry almost no information about the focal length.</p>
+
+<h2>Stereo calibration</h2>
+<p>A stereo rig needs both cameras' intrinsics $K_1, \mathbf{d}_1, K_2, \mathbf{d}_2$ and the relative pose $T_{21} = (R_{21}, \mathbf{t}_{21})$. The <b>baseline</b> $B = \|\mathbf{t}_{21}\|$ is the distance between the camera centers. On a rigid rig the relative pose is assumed constant over time.</p>
+<p>If both cameras see the same pattern state, the pattern frame cancels:</p>
+$$T_{21} = T_{2W,i}\,T_{1W,i}^{-1}, \qquad R_{21} = R_{2W,i}R_{1W,i}^\T, \qquad \mathbf{t}_{21} = \mathbf{t}_{2W,i} - R_{21}\mathbf{t}_{1W,i}$$
+<p>Noise gives a slightly different answer from every pair, so all pairs are optimized jointly:</p>
+$$\mathbf{q}_{ij} = R_{1W,i}\mathbf{P}_j + \mathbf{t}_{1W,i}, \quad \hat{\mathbf{m}}_{1ij} = \pi_{K_1,\mathbf{d}_1}(\mathbf{q}_{ij}), \quad \hat{\mathbf{m}}_{2ij} = \pi_{K_2,\mathbf{d}_2}(R_{21}\mathbf{q}_{ij} + \mathbf{t}_{21})$$
+$$\min\sum_{i,j}\left(\|\mathbf{m}_{1ij} - \hat{\mathbf{m}}_{1ij}\|^2 + \|\mathbf{m}_{2ij} - \hat{\mathbf{m}}_{2ij}\|^2\right)$$
+<table class="tbl compact">
+  <tr><th>Item</th><th>Symbol</th><th>Treatment</th></tr>
+  <tr><td>known target</td><td>$\mathbf{P}_j$</td><td>defined in real length units</td></tr>
+  <tr><td>image observations</td><td>$\mathbf{m}_{1ij}, \mathbf{m}_{2ij}$</td><td>two observations of the same feature</td></tr>
+  <tr><td>target pose per pair</td><td>$T_{1W,i}$</td><td>estimated per image pair</td></tr>
+  <tr><td>extrinsic</td><td>$T_{21}$</td><td>shared by all pairs</td></tr>
+  <tr><td>intrinsics</td><td>$K_1, \mathbf{d}_1, K_2, \mathbf{d}_2$</td><td>fixed (if reliable) or estimated jointly</td></tr>
+</table>
+<div class="co pitfall"><p>If the pattern moves while you capture, the two images of a pair must be taken at the same instant — otherwise the time difference inside each pair corrupts $T_{21}$.</p></div>
+
+<h2>Epipolar geometry</h2>
+<figure class="fig"><div class="panel"><img src="fig/l3_epipolar.svg" alt=""></div>
+<figcaption>The camera centers $O_1$, $O_2$ and the point X span the <b>epipolar plane</b>. Whatever the depth of X along the ray through $\mathbf{x}_1$, its image in camera 2 lies on the same <b>epipolar line</b> $\ell_2$ — matching becomes a 1-D search.</figcaption></figure>
+<p>In normalized homogeneous coordinates $\mathbf{x} = K^{-1}\tilde{\mathbf{m}}$, the two rays and the translation are coplanar ($\lambda$ = depth along each ray):</p>
+$$\lambda_2\mathbf{x}_2 = R_{21}(\lambda_1\mathbf{x}_1) + \mathbf{t}_{21} \quad\Rightarrow\quad \mathbf{x}_2^\T(\mathbf{t}_{21} \times R_{21}\mathbf{x}_1) = 0$$
+$$E = [\mathbf{t}_{21}]_\times R_{21}, \qquad F = K_2^{-\T}EK_1^{-1}, \qquad \tilde{\mathbf{m}}_2^\T F\,\tilde{\mathbf{m}}_1 = 0, \qquad \ell_2 = F\tilde{\mathbf{m}}_1$$
+<ul>
+<li>$[\mathbf{t}]_\times\mathbf{a} = \mathbf{t}\times\mathbf{a}$; the <b>essential matrix</b> $E$ works in normalized coordinates, the <b>fundamental matrix</b> $F$ in pixels. Both are defined up to scale.</li>
+<li>It holds for an ideal pinhole model, i.e. on <b>undistorted</b> coordinates.</li>
+</ul>
+<div class="co key" data-t="Metric scale (slide 23)"><p>Scaling the translation leaves the constraint unchanged: $E \sim [\alpha\mathbf{t}_{21}]_\times R_{21}$ for any $\alpha \ne 0$. Two images of natural features give the rotation and only the <b>direction</b> of the translation. The true baseline $B = \|\mathbf{t}_{21}\|$ needs metric information — a target of known size or a separate distance measurement. (Planar-target stereo calibration and essential-matrix estimation in a general scene are different problems.)</p></div>
+
+<h2>Rectification, disparity and depth</h2>
+<p><b>Rectification</b> reprojects the two undistorted images onto the image planes of two virtual, parallel cameras whose baseline lies along the horizontal axis. With new projection matrices, matching points end up on the same row: $v_1^\text{rect} \simeq v_2^\text{rect}$.</p>
+<div class="side wide-l">
+<figure class="fig"><div class="panel">
+<svg class="dia" viewBox="0 0 340 240" width="340" height="240">
+  <line x1="80" y1="205" x2="80" y2="40" class="dash"/>
+  <line x1="240" y1="205" x2="240" y2="40" class="dash"/>
+  <line x1="45" y1="165" x2="118" y2="165" stroke="#a78bfa" stroke-width="2.4"/>
+  <line x1="202" y1="165" x2="276" y2="165" stroke="#a78bfa" stroke-width="2.4"/>
+  <line x1="80" y1="205" x2="130" y2="45" stroke="#fbbf24" stroke-width="1.4"/>
+  <line x1="240" y1="205" x2="130" y2="45" stroke="#fbbf24" stroke-width="1.4"/>
+  <circle cx="130" cy="45" r="5" fill="#fbbf24"/>
+  <text x="138" y="42" class="mr" style="fill:#fbbf24">X</text>
+  <circle cx="92.5" cy="165" r="3.5" fill="#f5f7fb"/>
+  <circle cx="212.5" cy="165" r="3.5" fill="#f5f7fb"/>
+  <line x1="80" y1="153" x2="92.5" y2="153" stroke="#22d3ee" stroke-width="1.6"/>
+  <text x="70" y="146" class="m" style="fill:#22d3ee;font-size:13px">u<tspan class="sub" dy="3">1</tspan></text>
+  <line x1="212.5" y1="153" x2="240" y2="153" stroke="#22d3ee" stroke-width="1.6"/>
+  <text x="214" y="146" class="m" style="fill:#22d3ee;font-size:13px">−u<tspan class="sub" dy="3">2</tspan></text>
+  <rect x="72" y="199" width="16" height="12" rx="2" fill="#c6cdd8"/><rect x="232" y="199" width="16" height="12" rx="2" fill="#c6cdd8"/>
+  <text x="62" y="228" class="mr">O</text><text x="232" y="228" class="mr">O′</text>
+  <line x1="80" y1="232" x2="240" y2="232" stroke="#6f7a8e"/>
+  <text x="152" y="228" class="m">B</text>
+  <line x1="30" y1="165" x2="30" y2="205" stroke="#6f7a8e"/><text x="16" y="190" class="m">f</text>
+  <line x1="300" y1="45" x2="300" y2="205" stroke="#6f7a8e"/><text x="306" y="128" class="m">Z</text>
+</svg></div>
+<figcaption>Top view of a rectified pair. Similar triangles: $Z/B = f/(u_1 - u_2)$.</figcaption></figure>
+<div>
+$$d_u = u_1 - u_2, \qquad Z = \frac{fB}{d_u}$$
+<ul>
+<li>Assumes both rectified images share the same focal length and principal point.</li>
+<li>$f$ and $d_u$ in pixels; $B$ and $Z$ in the same length unit.</li>
+<li>The camera order is chosen so that disparity is positive. A general (unrectified) pair is triangulated with the two projection matrices instead.</li>
+</ul>
+</div>
+</div>
+<p><b>Depth error.</b> Differentiate $Z = fB/d$: $|\partial Z/\partial d| = fB/d^2 = Z^2/(fB)$, so to first order</p>
+$$\sigma_Z \simeq \frac{Z^2}{fB}\,\sigma_{d_u}$$
+<table class="tbl compact">
+  <tr><th>Disparity [pixel]</th><th class="num">Depth [m]</th><th class="num">$\sigma_Z$ [m]</th></tr>
+  <tr><td>48</td><td class="num">2.0</td><td class="num">0.021</td></tr>
+  <tr><td>12</td><td class="num">8.0</td><td class="num">0.333</td></tr>
+</table>
+<p class="small">$f = 800$ px, $B = 0.12$ m, $\sigma_{d_u} = 0.5$ px (slide 26). Only disparity noise is included; intrinsic and baseline errors are excluded.</p>
+<figure class="fig"><div class="panel"><img src="fig/l3_depth.svg" alt=""></div>
+<figcaption>Depth error grows with the square of the distance; doubling the baseline halves it.</figcaption></figure>
+<div class="co tip"><p>Typical questions: compute $Z$ from $d$; compute $\sigma_Z$ at two distances and compare (ratio = distance ratio squared); say what to change to halve the error at long range (double $B$ or $f$, or improve sub-pixel matching).</p></div>
+
+<h3>More than two cameras</h3>
+<p>Pick a reference camera and keep every relative transform in the same convention: $T_{31} = T_{32}T_{21}$. Neighboring cameras need overlapping fields of view and shared target observations (not all cameras have to see the target at once). If transforms are estimated separately, <b>cycle consistency</b> $T_{13}T_{32}T_{21} \simeq I$ exposes inconsistencies — the further from $I$, the worse.</p>
+
+<h2>Camera–LiDAR calibration</h2>
+<p>Use geometric features visible in both the image and the point cloud. <b>Target-based</b> methods use a known pattern or a planar target; <b>targetless</b> methods build correspondences from scene edges, planes or motion. What is compared decides the residual and the data requirements. The lecture focuses on planar targets (Geiger et al. 2012).</p>
+<p><b>Plane features.</b> The camera gets each plane's pose from the known pattern geometry and its image; the LiDAR segments the target's points and fits a plane. Collect planes with <b>different normal directions</b> and make the normal signs consistent.</p>
+<h3>Rotation by SVD (orthogonal Procrustes)</h3>
+<p>Find the camera-to-LiDAR rotation that makes the unit normals of the same planes agree:</p>
+$$\sum_i\|\mathbf{n}_{L,i} - R\,\mathbf{n}_{C,i}\|^2 = 2N - 2\tr(RH_n), \qquad H_n = \sum_i\mathbf{n}_{C,i}\mathbf{n}_{L,i}^\T = U\Sigma V^\T$$
+$$\hat R_{LC} = V\diag\!\left(1, 1, \det(VU^\T)\right)U^\T$$
+<p>Minimizing the squared distance is the same as maximizing $\tr(RH_n)$. $U$, $V$ are orthogonal; the last diagonal entry forces $\det R = +1$ — without it, noisy or degenerate data can produce a <b>reflection</b> instead of a rotation.</p>
+<h3>Translation by linear least squares</h3>
+<p>With $R$ fixed, a point $\mathbf{p}_{C,i}$ of camera plane $i$, moved into the LiDAR frame, must lie on LiDAR plane $i$:</p>
+$$e_i = \mathbf{n}_{L,i}^\T(R_{LC}\mathbf{p}_{C,i} + \mathbf{t}_{LC} - \mathbf{p}_{L,i}), \qquad \mathbf{n}_{L,i}^\T\mathbf{t}_{LC} = b_i, \quad b_i = \mathbf{n}_{L,i}^\T(\mathbf{p}_{L,i} - R_{LC}\mathbf{p}_{C,i})$$
+$$\hat{\mathbf{t}}_{LC} = \argmin_{\mathbf{t}}\|N\mathbf{t} - \mathbf{b}\|^2$$
+<p>Each row of $N$ is $\mathbf{n}_{L,i}^\T$; with unit normals $e_i$ is a signed distance in metres. A <b>unique</b> solution needs $\rank(N) = 3$:</p>
+<table class="tbl compact">
+  <tr><th>Observation condition</th><th>Identifiable translation</th><th>Result</th></tr>
+  <tr><td>three independent normals</td><td>$x$, $y$, $z$</td><td>full rank possible</td></tr>
+  <tr><td>all normals $(0, 0, 1)$</td><td>$z$ only</td><td>$x$, $y$ undetermined</td></tr>
+  <tr><td>normals nearly parallel</td><td>a weakly constrained direction</td><td>sensitive to noise</td></tr>
+</table>
+<div class="co intuition"><p>A plane only tells you how far you are <em>along its normal</em>; sliding the sensor parallel to the plane changes nothing. So translation along a direction is observable only if some plane's normal has a component in that direction. (Worked case from the slide: with $N = I$ and $\mathbf{b} = (0.2, -0.1, 0.3)$ m, $\mathbf{t} = \mathbf{b}$.) Rotation estimation needs diverse normals too.</p></div>
+<h3>The Geiger pipeline and projecting LiDAR into the image</h3>
+<table class="tbl compact">
+  <tr><th>Step</th><th>Input and computation</th><th>Output</th></tr>
+  <tr><td>Feature extraction</td><td>corner detection, multi-image matching</td><td>matched features</td></tr>
+  <tr><td>Target reconstruction</td><td>triangulation, plane fitting</td><td>3-D targets and normals</td></tr>
+  <tr><td>Initial extrinsic</td><td>plane-correspondence hypotheses, $R\cdot\mathbf{t}$ estimation</td><td>transform candidates and scores</td></tr>
+  <tr><td>Refinement</td><td>ICP with the selected candidate</td><td>final extrinsic</td></tr>
+</table>
+<p class="small">Geiger's method uses several cameras — keep it distinct from single-camera target-pose methods.</p>
+<p>To draw LiDAR points on the image, invert the calibration and project:</p>
+$$\mathbf{p}_C = R_{LC}^\T(\mathbf{p}_L - \mathbf{t}_{LC}), \qquad \hat{\mathbf{m}} = \pi_{K,\mathbf{d}}(\mathbf{p}_C)$$
+<p>Example: $\mathbf{p}_L = (1.2, 0.4, 5.0)^\T$, $\mathbf{t}_{LC} = (0.2, -0.1, 0)^\T$ m, $R_{LC} = I$ → $\mathbf{p}_C = (1.0, 0.5, 5.0)^\T$ → $(u, v) = (800, 440)$. Use only points with $Z_C > 0$ that fall inside the image.</p>
+
+<h2>Camera–IMU and temporal calibration</h2>
+<table class="tbl compact">
+  <tr><th>Item</th><th>Default setting</th><th>Caution</th></tr>
+  <tr><td>camera model</td><td>$K$, $\mathbf{d}$ calibrated in advance</td><td>distinguish raw / undistorted models</td></tr>
+  <tr><td>IMU intrinsics</td><td>scale and misalignment corrected</td><td>if uncalibrated, include them in the state</td></tr>
+  <tr><td>IMU noise</td><td>noise density, bias random walk</td><td>used to weight the residuals</td></tr>
+  <tr><td>estimated state</td><td>extrinsic, time offset, trajectory, bias</td><td>depends on the algorithm</td></tr>
+</table>
+<p class="small">IMU intrinsic calibration and camera–IMU extrinsic calibration are different problems.</p>
+<h3>Measurement models</h3>
+<p><b>Gyroscope</b> — angular velocity in its own frame B, plus bias and noise. Rigidly mounted sensors share the angular velocity, rotated between frames:</p>
+$$\tilde{\boldsymbol\omega}_B(t) = \boldsymbol\omega_B(t) + \mathbf{b}_g(t) + \mathbf{n}_g(t), \qquad \boldsymbol\omega_C(t) = R_{CB}\,\boldsymbol\omega_B(t)$$
+<p>Comparing the camera's rotation with the gyroscope at the same time constrains the relative rotation $R_{CB}$.</p>
+<p><b>Accelerometer</b> — measures <b>specific force</b>: acceleration minus gravity, in the sensor frame. A stationary IMU therefore reads about $+9.81$ m/s² upward, not zero:</p>
+$$\tilde{\mathbf{a}}_B = R_{BG}(\ddot{\mathbf{p}}_{GB} - \mathbf{g}_G) + \mathbf{b}_a + \mathbf{n}_a$$
+<p><b>Lever arm.</b> The camera sits at $\mathbf{r}_{BC}$ from the IMU (expressed in B). Differentiating the position twice adds angular and centripetal terms:</p>
+$$\mathbf{p}_{GC} = \mathbf{p}_{GB} + R_{GB}\mathbf{r}_{BC}, \qquad \mathbf{a}_C^B - \mathbf{a}_B^B = \dot{\boldsymbol\omega}_B\times\mathbf{r}_{BC} + \boldsymbol\omega_B\times(\boldsymbol\omega_B\times\mathbf{r}_{BC})$$
+<h3>Time offset, rolling shutter, scan timing</h3>
+<p>Each sensor's timestamp is converted onto the reference (IMU) time axis before the state is evaluated: $t = \tau_S + \Delta t_{BS}$. During motion an offset becomes a pose error:</p>
+$$\Delta x \simeq v\,\Delta t, \qquad \Delta\theta \simeq \omega\,\Delta t \qquad\text{e.g. } 10\ \mathrm{m/s} \times 0.050\ \mathrm{s} = 0.50\ \mathrm{m}; \quad 20^\circ/\mathrm{s} \times 0.050\ \mathrm{s} = 1^\circ$$
+<p>Even after hardware synchronization, check what the timestamp actually means (exposure start? middle? transmission?) and its delay.</p>
+<p><b>Rolling shutter.</b> Image rows are exposed at different times. With row index $r$ (increasing top to bottom), $h$ rows and readout time $t_\text{read}$, referenced to the center row:</p>
+$$t(r) = \tau_C + \Delta t_{BC} + \left(\frac{r}{h} - \frac12\right)t_\text{read}$$
+<p>(other definitions shift the offset; for bottom-to-top readout flip the sign of the row term).</p>
+<p><b>LiDAR motion compensation.</b> A spinning LiDAR collects a scan over time; treating it as one instant distorts the geometry while moving. Compute the LiDAR pose at each point's own timestamp and transform into the fixed frame G:
+$\mathbf{p}_{G,n} = R_{GL}(t_n)\,\mathbf{p}_{L,n} + \mathbf{t}_{GL}(t_n)$ — accounting for both the time offset and the per-point time.</p>
+<h3>Continuous-time trajectory and the joint objective</h3>
+<p>Because measurements arrive at many different times, iKalibr represents the trajectory continuously. A uniform <b>cubic B-spline</b> writes position as a weighted sum of four control points $\mathbf{c}$, giving position, velocity and acceleration at any time:</p>
+$$\mathbf{p}(t) = \sum_{k=0}^{3}B_k(\xi)\,\mathbf{c}_{i+k}, \quad \xi = \frac{t - t_i}{\Delta T}\in[0, 1), \qquad \ddot{\mathbf{p}}(t) = \frac{1}{\Delta T^2}\sum_{k=0}^{3}B_k''(\xi)\,\mathbf{c}_{i+k}$$
+$$B_0 = \frac{(1-\xi)^3}{6},\quad B_1 = \frac{3\xi^3 - 6\xi^2 + 4}{6},\quad B_2 = \frac{-3\xi^3 + 3\xi^2 + 3\xi + 1}{6},\quad B_3 = \frac{\xi^3}{6}$$
+<p class="small">Rotation is represented separately on SO(3) — do not apply this formula to rotation-matrix entries.</p>
+<p>Differentiating the trajectory at the IMU times predicts the IMU readings, giving residuals that constrain the trajectory and the biases; the camera residual contains the extrinsic $T_{BC}$ and the time offset $\Delta t_{BC}$:</p>
+$$\mathbf{e}_{g,n} = \tilde{\boldsymbol\omega}_{B,n} - [\boldsymbol\omega_B(t_n) + \mathbf{b}_g(t_n)], \qquad \mathbf{e}_{a,n} = \tilde{\mathbf{a}}_{B,n} - [R_{BG}(t_n)(\ddot{\mathbf{p}}_{GB}(t_n) - \mathbf{g}_G) + \mathbf{b}_a(t_n)]$$
+$$\mathbf{e}_{C,n} = \mathbf{m}_n - \pi_{K,\mathbf{d}}\!\left(R_{CG}(t_n)\mathbf{P}_{G,n} + \mathbf{t}_{CG}(t_n)\right), \qquad \min_\Theta\sum_{s,n}\rho_s\!\left(\mathbf{e}_{s,n}^\T\Sigma_{s,n}^{-1}\mathbf{e}_{s,n}\right)$$
+<p>Here $s$ is the residual type, $\Sigma$ its covariance and $\rho$ a <b>robust loss</b> (iKalibr uses Cauchy) that limits the influence of outliers. $\Theta$ holds the extrinsic, time offset, trajectory and biases. Normalizing by $\Sigma$ makes different units comparable: a 2-pixel error when σ = 1 px counts the same as 0.02 rad/s when σ = 0.01 rad/s — both contribute $(2)^2 = 4$.</p>
+<h3>Observability: why the motion must be exciting</h3>
+<p>If different parameter combinations predict the same observations, they cannot be identified separately. 1-D example with constant velocity $v$, position offset $b$ and time offset $\Delta t$:</p>
+$$y(\tau) = v(\tau + \Delta t) + b = v\tau + (v\Delta t + b)$$
+<p>With $v = 10$ m/s, $(\Delta t, b) = (0.05\ \mathrm{s}, 0)$ and $(0, 0.5\ \mathrm{m})$ both predict $y = 10\tau + 0.5$ — only the sum $v\Delta t + b$ is observable.</p>
+<figure class="fig"><div class="panel"><img src="fig/l3_observ.svg" alt=""></div>
+<figcaption>Varying the velocity makes the two hypotheses predict different data, so they become separable. In practice: rotate about several axes and vary the acceleration during camera–IMU calibration.</figcaption></figure>
+
+<h2>Validation and diagnostics</h2>
+<table class="tbl">
+  <tr><th style="width:17%">Metric</th><th>What it evaluates</th><th style="width:36%">Limits of interpretation</th></tr>
+  <tr><td><b>Residual</b></td><td>observation vs. model prediction</td><td>can hide model error and bias</td></tr>
+  <tr><td><b>Accuracy</b></td><td>estimation error against the true value</td><td>needs a trustworthy reference</td></tr>
+  <tr><td><b>Repeatability</b></td><td>spread of repeated estimates</td><td>does not detect a consistent bias</td></tr>
+</table>
+<div class="co key"><p>A low residual and accurate parameters are not the same thing. Distinguish the RMS on the optimization data from the result on <b>independent validation data</b>.</p></div>
+<p><b>Residual distributions.</b> Plot horizontal vs vertical reprojection residuals: a center away from the origin reveals a directional bias; an elongated cloud shows a direction of large spread. This plot cannot show error by image position — use a separate residual map for that.</p>
+<p><b>Stereo geometry.</b> Evaluate the epipolar error on undistorted coordinates and the vertical error after rectification:</p>
+$$\ell_2 = F\tilde{\mathbf{m}}_1 = (a, b, c)^\T, \qquad d_\text{epi} = \frac{|\tilde{\mathbf{m}}_2^\T\ell_2|}{\sqrt{a^2 + b^2}}, \qquad e_v = v_1^\text{rect} - v_2^\text{rect}$$
+<p>Check $e_v \approx 0$ at different distances and image regions. These two metrics cannot guarantee a correct <b>metric</b> baseline — that needs a known length.</p>
+<p><b>Image–LiDAR consistency.</b> Compare object boundaries in the image with the projected (inverse) depth, at different distances and directions; separate occlusion, timing and moving objects from genuine extrinsic error.</p>
+<p><b>Repeatability vs accuracy (iKalibr Table VI, Cam-0):</b></p>
+<table class="tbl compact">
+  <tr><th>Item</th><th class="num">iKalibr mean ± std</th><th class="num">Kalibr mean ± std</th></tr>
+  <tr><td>translation $x$ [cm]</td><td class="num">7.495 ± 0.207</td><td class="num">7.941 ± 0.128</td></tr>
+  <tr><td>translation $y$ [cm]</td><td class="num">−24.997 ± 0.205</td><td class="num">−25.630 ± 0.016</td></tr>
+  <tr><td>time offset [ms]</td><td class="num">−22.816 ± 0.347</td><td class="num">−23.300 ± 0.141</td></tr>
+</table>
+<p>The $x$ means differ by 0.446 cm — far more than either spread — yet the table cannot say which is correct: both methods are repeatable, at least one is biased.</p>
+<h3>Independent validation data</h3>
+<table class="tbl compact">
+  <tr><th>Target</th><th>Separate data</th><th>Evaluation</th></tr>
+  <tr><td>camera intrinsic</td><td>target images at new positions/tilts</td><td>fix $K$, $\mathbf{d}$; estimate only the target pose</td></tr>
+  <tr><td>stereo</td><td>separate pairs, a known length</td><td>vertical residual, depth and scale error</td></tr>
+  <tr><td>camera–LiDAR</td><td>targets at other angles/distances</td><td>fix the extrinsic; geometric residual</td></tr>
+  <tr><td>camera–IMU</td><td>a different motion segment</td><td>fix extrinsic and $\Delta t$; prediction residual</td></tr>
+</table>
+<p class="small">The target pose and trajectory of a new segment may be estimated; the calibration parameters may not.</p>
+<h3>Scale and unit errors</h3>
+<p>Perspective projection cannot see scale: $\pi_{K,\mathbf{d}}(\alpha(R\mathbf{P} + \mathbf{t})) = \pi_{K,\mathbf{d}}(R\mathbf{P} + \mathbf{t})$ for $\alpha > 0$. So if the pattern size is entered 10 % too large ($\mathbf{P} \mapsto 1.10\mathbf{P}$), the estimated translations become 10 % too large ($\mathbf{t} \mapsto 1.10\mathbf{t}$) while the reprojection error stays just as low. Mixing mm and m gives a 1000× error. Record the output unit with the actual pattern dimensions.</p>
+<h3>Diagnosing from symptoms</h3>
+<table class="tbl">
+  <tr><th style="width:40%">Observed symptom</th><th>Check these first</th></tr>
+  <tr><td>points project behind the camera</td><td>direction of $T_{AB}$, inverse transform, axis convention</td></tr>
+  <tr><td>error grows toward the image edge</td><td>distortion model, intrinsics, crop/resize</td></tr>
+  <tr><td>fine at rest, worse while moving</td><td>time offset, rolling shutter, scan timing</td></tr>
+  <tr><td>results vary a lot between captures</td><td>observability (motion/pose diversity), initial values, target quality</td></tr>
+</table>
+<p class="small">A symptom does not pin down the cause; check the model, the data, and the code that applies the result, in that order.</p>
+<h3>Workflow, output specification and the unified model</h3>
+<table class="tbl compact">
+  <tr><th>Stage</th><th>Task</th><th>Verify</th></tr>
+  <tr><td>common preparation</td><td>camera model / IMU internal errors</td><td>model, unit, noise settings</td></tr>
+  <tr><td>stereo setup</td><td>camera–camera calibration</td><td>relative pose, stereo residual</td></tr>
+  <tr><td>camera–LiDAR setup</td><td>image–point-cloud registration</td><td>extrinsic (time offset if needed)</td></tr>
+  <tr><td>camera–IMU setup</td><td>joint image and inertial estimation</td><td>extrinsic, time offset</td></tr>
+  <tr><td>common validation</td><td>separate data, joint refinement if needed</td><td>residual, scale, repeat spread</td></tr>
+</table>
+<p>Store with every result: the camera's $K$, distortion model and coefficient order, image size; for extrinsics the source and destination frames, the $R\cdot\mathbf{t}$ form and the length unit; for timing the reference clock, the sign of $\Delta t$ and what the timestamp refers to; the sensor settings (focus/zoom, crop/resize, readout); and the validation data, metrics and scope of use. All three calibrations meet in one observation model:</p>
+$$t_n = \tau_C + \Delta t_{BC}, \qquad T_{CG}(t_n) = [T_{GB}(t_n)\,T_{BC}]^{-1}, \qquad \hat{\mathbf{m}}_n = \pi_{K,\mathbf{d}}\!\left(R_{CG}(t_n)\mathbf{P}_G + \mathbf{t}_{CG}(t_n)\right)$$
+<p>— the <b>intrinsics</b> set the projection, the <b>extrinsic</b> sets the fixed relative pose, and the <b>temporal</b> calibration sets the time at which the motion is evaluated.</p>
+
+<h2>Formula sheet</h2>
+<div class="fsheet">
+  <div class="f"><div class="n">Pinhole projection</div><div class="eq">$u = f_x\frac{X_C}{Z_C} + c_x,\ \ v = f_y\frac{Y_C}{Z_C} + c_y$</div></div>
+  <div class="f"><div class="n">Radial distortion</div><div class="eq">$x_d = x(1 + k_1r^2 + k_2r^4 + k_3r^6) + \dots$</div></div>
+  <div class="f"><div class="n">Homography (planar target)</div><div class="eq">$H \sim K[\mathbf{r}_1\ \mathbf{r}_2\ \mathbf{t}],\ \ 8\ \text{DoF},\ \ge4\ \text{points}$</div></div>
+  <div class="f"><div class="n">Zhang constraints</div><div class="eq">$\mathbf{h}_1^\T B\mathbf{h}_2 = 0,\ \mathbf{h}_1^\T B\mathbf{h}_1 = \mathbf{h}_2^\T B\mathbf{h}_2,\ B = K^{-\T}K^{-1}$</div></div>
+  <div class="f"><div class="n">Reprojection RMS</div><div class="eq">$\sqrt{\tfrac1N\sum_n\|\mathbf{e}_n\|^2}\ \ (\text{per coordinate: } 2N)$</div></div>
+  <div class="f"><div class="n">Stereo relative pose</div><div class="eq">$R_{21} = R_{2W}R_{1W}^\T,\ \mathbf{t}_{21} = \mathbf{t}_{2W} - R_{21}\mathbf{t}_{1W}$</div></div>
+  <div class="f"><div class="n">Epipolar constraint</div><div class="eq">$\tilde{\mathbf{m}}_2^\T F\tilde{\mathbf{m}}_1 = 0,\ F = K_2^{-\T}[\mathbf{t}]_\times RK_1^{-1}$</div></div>
+  <div class="f"><div class="n">Depth from disparity</div><div class="eq">$Z = \frac{fB}{d},\ \ \sigma_Z \simeq \frac{Z^2}{fB}\sigma_d$</div></div>
+  <div class="f"><div class="n">Rotation from normals</div><div class="eq">$H_n = \sum\mathbf{n}_C\mathbf{n}_L^\T = U\Sigma V^\T,\ \hat R = V\diag(1,1,\det VU^\T)U^\T$</div></div>
+  <div class="f"><div class="n">Translation from planes</div><div class="eq">$\mathbf{n}_{L,i}^\T\mathbf{t} = b_i,\ \ \rank N = 3$</div></div>
+  <div class="f"><div class="n">Gyro · accelerometer</div><div class="eq">$\tilde{\boldsymbol\omega} = \boldsymbol\omega + \mathbf{b}_g + \mathbf{n}_g,\ \ \tilde{\mathbf{a}} = R_{BG}(\ddot{\mathbf{p}} - \mathbf{g}) + \mathbf{b}_a + \mathbf{n}_a$</div></div>
+  <div class="f"><div class="n">Time offset · rolling shutter</div><div class="eq">$\Delta x \simeq v\Delta t,\ \ t(r) = \tau_C + \Delta t + (\tfrac{r}{h} - \tfrac12)t_\text{read}$</div></div>
+</div>
+
+<h2>Practice questions</h2>
+<div class="qa" data-type="concept" data-level="1">
+<div class="q"><p>A camera is unbolted from a robot and remounted 5 cm further forward with the same lens settings. Which calibration parameters must be redone: intrinsics, extrinsics, time offset? What if instead the zoom is changed?</p></div>
+<div class="a"><p>Remounting changes only the <b>extrinsic</b> (camera pose relative to the robot/other sensors); $K$ and distortion belong to the camera–lens unit and stay valid, and the time offset depends on the electronics, not the mount. Changing the <b>zoom</b> (or focus, or resolution/crop) changes the <b>intrinsics</b> — focal length, often principal point and distortion — so intrinsic calibration must be repeated (and anything that depended on it, like a stereo rectification).</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="1">
+<div class="q"><p>With $f_x = f_y = 800$, $c = (640, 360)$, project $\mathbf{p}_C = (0.5, -0.2, 4.0)$ m. What happens for $\mathbf{p}_C = (0.5, -0.2, -4.0)$?</p></div>
+<div class="a"><p>$u = 800 \times 0.5/4 + 640 = 740$, $v = 800 \times (-0.2)/4 + 360 = 320$ → pixel $(740, 320)$, above and right of the center (image $v$ grows downward). For $Z_C = -4$ the point is behind the camera; the formula would still output a pixel ($(540, 400)$) but it is meaningless — always check $Z_C > 0$ before projecting (a classic sign that $T_{AB}$ was used in the wrong direction).</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>A normalized point $(x, y) = (0.3, 0.2)$ has $k_1 = -0.25$, $k_2 = 0.05$, no tangential terms, $f = 800$, $c = (640, 360)$. Find the distorted pixel, and say whether the lens shows barrel or pincushion distortion.</p></div>
+<div class="a"><p>$r^2 = 0.13$, $g = 1 - 0.0325 + 0.000845 = 0.968345$, $(x_d, y_d) = (0.29050, 0.19367)$ → pixel $(872.4, 514.9)$ versus $(880, 520)$ undistorted. The point is pulled about 9 px toward the center: <b>barrel</b> distortion ($g < 1$, driven by $k_1 < 0$).</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="derive" data-level="2">
+<div class="q"><p>Starting from $H \sim K[\mathbf{r}_1\ \mathbf{r}_2\ \mathbf{t}]$, derive Zhang's two constraints on $B = K^{-\T}K^{-1}$. Why exactly two per image, and how many images are needed for five intrinsics?</p></div>
+<div class="a"><p>From $H = \lambda K[\mathbf{r}_1\ \mathbf{r}_2\ \mathbf{t}]$: $\mathbf{r}_1 = \frac1\lambda K^{-1}\mathbf{h}_1$, $\mathbf{r}_2 = \frac1\lambda K^{-1}\mathbf{h}_2$. Rotation columns satisfy $\mathbf{r}_1^\T\mathbf{r}_2 = 0$ and $\mathbf{r}_1^\T\mathbf{r}_1 = \mathbf{r}_2^\T\mathbf{r}_2$. Substituting: $\mathbf{h}_1^\T K^{-\T}K^{-1}\mathbf{h}_2 = 0$ and $\mathbf{h}_1^\T K^{-\T}K^{-1}\mathbf{h}_1 = \mathbf{h}_2^\T K^{-\T}K^{-1}\mathbf{h}_2$ (the unknown $\lambda$ cancels).
+A homography has 8 DoF, of which 6 describe the pose ($\mathbf{r}_1, \mathbf{r}_2, \mathbf{t}$ = 3 rotation + 3 translation), leaving 2 for the intrinsics. $B$ has 6 entries known up to scale = 5 unknowns, so at least 3 images in general position (or 2 images plus an extra assumption such as zero skew).</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>A student calibrates with 40 images, all taken with the checkerboard facing the camera squarely at different distances. The RMS reprojection error is low, but the focal length changes a lot between runs. Explain and fix.</p></div>
+<div class="a"><p>Fronto-parallel views give nearly identical, nearly degenerate homography constraints: changing the focal length and the board distance together explains the images almost equally well, so $f$ is poorly <b>conditioned</b> (Zhang's simulation: error explodes as the tilt angle → 0). The low RMS is a <em>residual</em>; the run-to-run spread is poor <em>repeatability</em>. Fix: capture tilted views (e.g. 30–60° about different axes), cover the image corners, keep focus/zoom fixed, then validate on a separate image set.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="1">
+<div class="q"><p>Residuals of three points are $(-2, 1)$, $(1, 1)$ and $(0, -2)$ pixels. Compute the per-point RMS and the per-coordinate RMS.</p></div>
+<div class="a"><p>Squared norms: 5, 2, 4 → sum 11. Per-point: $\sqrt{11/3} = 1.91$ px. Per-coordinate (6 numbers): $\sqrt{11/6} = 1.35$ px. Same data, factor $\sqrt2$ — so a reported "RMS" is meaningless without its definition.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>A rectified stereo camera has $f = 700$ px and $B = 0.5$ m. (a) A point has disparity 35 px: depth? (b) With $\sigma_d = 0.25$ px, what is $\sigma_Z$? (c) Repeat (a)–(b) for an object at 20 m.</p></div>
+<div class="a"><p>(a) $Z = 700 \times 0.5/35 = 10$ m. (b) $\sigma_Z = Z^2\sigma_d/(fB) = 100 \times 0.25/350 \approx 0.071$ m. (c) $d = fB/Z = 17.5$ px; $\sigma_Z = 400 \times 0.25/350 \approx 0.286$ m — twice the distance, four times the error.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="3">
+<div class="q"><p>For a rectified pair in normalized coordinates, $R = I$ and $\mathbf{t} = (1, 0, 0)$, so $E = [\mathbf{t}]_\times = \begin{bmatrix} 0 & 0 & 0 \\ 0 & 0 & -1 \\ 0 & 1 & 0 \end{bmatrix}$. For $\mathbf{x}_1 = (0.2, 0.1, 1)$ find the epipolar line in image 2 and the epipolar error of the candidate match $\mathbf{x}_2 = (0.05, 0.13, 1)$.</p></div>
+<div class="a"><p>$\ell_2 = E\mathbf{x}_1 = (0, -1, 0.1)$, i.e. $-y + 0.1 = 0$: the horizontal line $y = 0.1$ — the <b>same row</b> as $\mathbf{x}_1$, exactly what rectification promises. Distance: $|\mathbf{x}_2^\T\ell_2|/\sqrt{a^2 + b^2} = |{-0.13} + 0.1|/1 = 0.03$ (normalized units; ×$f$ for pixels, e.g. 24 px at $f = 800$). A good match would have nearly zero distance, so this candidate is suspicious.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>Why can the essential matrix estimated from natural features not give the metric baseline? Give two ways to obtain it.</p></div>
+<div class="a"><p>The epipolar constraint $\mathbf{x}_2^\T[\mathbf{t}]_\times R\mathbf{x}_1 = 0$ is homogeneous in $\mathbf{t}$: replacing $\mathbf{t}$ by $\alpha\mathbf{t}$ leaves it unchanged. Geometrically, a scene twice as large seen from cameras twice as far apart produces identical images. Metric scale needs external information: a calibration target with known square size (planar-target stereo calibration), or a measured distance (tape, a known object, another sensor such as LiDAR or wheel odometry).</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>For camera–LiDAR calibration a technician records 20 captures, always with the target board flat on the floor. The rotation looks fine but the translation is unreliable. Why? What should be recorded instead?</p></div>
+<div class="a"><p>All normals are $(0, 0, 1)$, so every row of $N$ is the same and $\rank N = 1$: only the $z$ (height) component of $\mathbf{t}$ is constrained; $x$ and $y$ are undetermined (sliding parallel to the floor changes no plane distance). Even the rotation is weakly constrained about the vertical axis. Record the board in at least three clearly different orientations (e.g. tilted left, tilted right, pitched forward) so the normals span 3-D, and make the normal signs consistent.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>In $\hat R = V\diag(1, 1, \det(VU^\T))U^\T$, what goes wrong if the $\det$ term is replaced by 1?</p></div>
+<div class="a"><p>$VU^\T$ is orthogonal but can have determinant −1, i.e. be a <b>reflection</b> — physically impossible for a sensor mount but possible as the best orthogonal fit to noisy or nearly planar (degenerate) normals. The $\det$ entry flips the axis with the smallest singular value so that $\det\hat R = +1$, giving the closest proper rotation.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>Camera and IMU have an unmodeled 30 ms time offset. The robot drives at 2 m/s while turning at 90°/s. Estimate the position and heading errors, and the lateral error this heading error causes for a landmark 10 m ahead.</p></div>
+<div class="a"><p>Position: $2 \times 0.03 = 0.06$ m. Heading: $90 \times 0.03 = 2.7^\circ$. Lateral error at 10 m: $10\tan2.7^\circ \approx 0.47$ m. Rotation dominates — a reason to excite rotation during temporal calibration and to watch for errors that appear only while turning.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="1">
+<div class="q"><p>A rolling-shutter camera has 1080 rows and a 30 ms readout, top to bottom, referenced to the center row. At what time relative to the frame timestamp (ignoring $\Delta t$) is row 810 exposed?</p></div>
+<div class="a"><p>$(r/h - 1/2)\,t_\text{read} = (810/1080 - 0.5) \times 30\ \mathrm{ms} = 0.25 \times 30 = +7.5$ ms after the center row. Rows near the top are exposed up to 15 ms earlier, rows near the bottom up to 15 ms later — at 2 m/s that is a ±3 cm skew across the image.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>A LiDAR point $\mathbf{p}_L = (2.2, 0.9, 10.0)$ m (same calibration as the slide-34 example: $R_{LC} = I$, $\mathbf{t}_{LC} = (0.2, -0.1, 0)$) projects to which pixel? What does the result tell you about how to check a camera–LiDAR calibration?</p></div>
+<div class="a"><p>$\mathbf{p}_C = (2.0, 1.0, 10.0)$ → $(u, v) = (800 \cdot 0.2 + 640,\ 800 \cdot 0.1 + 360) = (800, 440)$ — the same pixel as the 5 m point of the slide, because both lie on one camera ray. A projection overlay alone therefore cannot verify depth; compare <b>object boundaries</b> and the projected <b>inverse depth</b>, check at several distances and directions, and rule out occlusion, timing and moving objects before blaming the extrinsic.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>The printed checkerboard squares are 24 mm but 25 mm was entered in the software. Which outputs are wrong, by how much, and would the reprojection error reveal it?</p></div>
+<div class="a"><p>Projection is scale-invariant, so $K$ and distortion are unaffected and the reprojection error stays low — it does <b>not</b> reveal the mistake. All translations (pattern poses, and a stereo baseline estimated from them) come out scaled by $25/24 = 1.042$, i.e. 4.2 % too large; stereo depths would be 4.2 % too large as well. Detect it with independent metric validation (a known length or distance).</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>Match each symptom to its most likely cause: (a) reprojection errors small in the center but large near the corners; (b) LiDAR points fit the image perfectly when the robot is parked but drift sideways when it turns; (c) projected points appear upside down or behind the camera.</p></div>
+<div class="a"><p>(a) Distortion model or intrinsics — too few coefficients, images that never covered the corners, or a crop/resize not reflected in $K$. (b) Temporal error — a camera–LiDAR/IMU time offset, rolling shutter, or uncompensated LiDAR scan motion (it only shows when $\omega \ne 0$). (c) Transform convention — $T_{AB}$ used instead of $T_{BA}$, a missing inverse, or a mismatched axis convention.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>During camera–IMU calibration the operator moves the rig slowly in a straight line at constant speed. Explain, using $y = v(\tau + \Delta t) + b$, why the time offset is poorly estimated, and describe a better motion.</p></div>
+<div class="a"><p>With constant $v$, observations depend only on $v\Delta t + b$, so a time offset can be traded for a position (lever-arm/translation) offset without changing the data: the parameters are not separately <b>observable</b>, and the estimate is driven by noise. A good motion varies the velocity and acceleration and rotates about all three axes (figure-eights, tilting, rotating while translating), so that a time shift produces errors that no constant offset can explain.</p></div>
+</div><!--/qa-->
+</section>

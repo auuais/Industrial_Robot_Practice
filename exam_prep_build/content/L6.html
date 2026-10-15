@@ -1,0 +1,330 @@
+<section class="chapter l6" id="ch-l6">
+<header class="ch-head">
+  <div class="ch-bignum">06</div>
+  <div class="ch-kicker">Lecture 6 · State estimation &amp; mapping</div>
+  <h1>EKF, UKF and pose-graph optimization</h1>
+  <p class="ch-sub">The Kalman gain in matrix form, two ways to handle nonlinear models, and how optimizing a whole trajectory repairs both the path and the map.</p>
+</header>
+<div class="glance">
+  <div><div class="gh">After this chapter you can</div><ul>
+    <li><b>derive</b> $K = P^-H^\T S^{-1}$ and the Joseph-form covariance update</li>
+    <li>build EKF Jacobians for the unicycle motion model and a range–bearing sensor, and run an update by hand (with angle wrapping)</li>
+    <li>compute UKF sigma points, weights, predicted mean and covariances, and explain why they beat the tangent</li>
+    <li>set up a pose graph: states, relative-pose residuals, whitening, sparse Jacobian, Gauss–Newton</li>
+    <li>explain why loop closures fix past poses and how the map is rebuilt</li>
+  </ul></div>
+  <div><div class="gh">Slide map</div><ul class="slidemap">
+    <li><span>Problem: pose + landmark observations</span><span class="sl">s1–2</span></li>
+    <li><span>Kalman gain matrix derivation</span><span class="sl">s3–7</span></li>
+    <li><span>EKF: models, Jacobians, update, tracking</span><span class="sl">s8–14</span></li>
+    <li><span>UKF: sigma points, prediction, update</span><span class="sl">s15–21</span></li>
+    <li><span>Pose error and map alignment</span><span class="sl">s22</span></li>
+    <li><span>Pose graph: states, residuals, cost</span><span class="sl">s23–27</span></li>
+    <li><span>Jacobians, Gauss–Newton, map rebuild</span><span class="sl">s28–37</span></li>
+  </ul></div>
+</div>
+
+<h2>The problem: a pose from motion and landmarks</h2>
+<p>The robot estimates position <em>and</em> heading, $\mathbf{x} = [p_x, p_y, \theta]^\T$. It <b>predicts</b> with its linear and angular velocity through a motion function $f$, then <b>corrects</b> with range and bearing measured to landmarks whose positions are known, through an observation function $h$. Both $f$ and $h$ are nonlinear (sines, cosines, square roots, atan2), so the linear filter of chapter 4 must be extended.</p>
+<figure class="fig"><div class="panel">
+<svg class="dia" viewBox="0 0 660 130" width="660" height="130">
+  <defs><marker id="a8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#8a94a7"/></marker></defs>
+  <rect x="8" y="22" width="150" height="70" rx="10" class="f-surface2" stroke="#8a94a7"/>
+  <text x="22" y="46" class="ttl">corrected state</text>
+  <text x="22" y="66" class="m" style="font-size:13px">x̂⁺<tspan class="sub" dy="3">k−1</tspan><tspan dy="-3">, P⁺</tspan><tspan class="sub" dy="3">k−1</tspan></text>
+  <rect x="226" y="22" width="190" height="70" rx="10" class="f-surface2" stroke="#fb7185"/>
+  <text x="240" y="46" class="ttl" style="fill:#fb7185">PREDICT with f(x, u)</text>
+  <text x="240" y="66" class="m" style="font-size:12.5px">x̂⁻ = f(x̂⁺, u),  P⁻ = FP⁺Fᵀ + Q</text>
+  <text x="240" y="84" class="lbl">uncertainty grows</text>
+  <rect x="484" y="22" width="168" height="70" rx="10" class="f-surface2" stroke="#4ade80"/>
+  <text x="498" y="46" class="ttl" style="fill:#4ade80">CORRECT with h(x)</text>
+  <text x="498" y="66" class="m" style="font-size:12.5px">ν = z − h(x̂⁻),  K = P⁻HᵀS⁻¹</text>
+  <text x="498" y="84" class="lbl">uncertainty shrinks</text>
+  <line x1="159" y1="57" x2="224" y2="57" stroke="#8a94a7" stroke-width="1.5" marker-end="url(#a8)"/>
+  <text x="168" y="50" class="lbl">u = [v, ω]</text>
+  <line x1="417" y1="57" x2="482" y2="57" stroke="#8a94a7" stroke-width="1.5" marker-end="url(#a8)"/>
+  <text x="430" y="50" class="lbl">z = [ρ, φ]</text>
+  <path d="M 568 93 C 568 110, 84 110, 84 95" fill="none" stroke="#8a94a7" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#a8)"/>
+  <text x="250" y="124" class="lbl">k ← k + 1: the corrected estimate feeds the next prediction</text>
+</svg></div>
+<figcaption>The predict–correct cycle shared by the KF, EKF and UKF. They differ only in how they push a mean and covariance through $f$ and $h$.</figcaption></figure>
+
+<h2>The Kalman gain in matrix form</h2>
+<p>Linear observation model with $n$ states and $m$ observations:</p>
+$$\mathbf{z} = H\mathbf{x} + \boldsymbol\varepsilon, \qquad H\in\mathbb{R}^{m\times n}, \quad K\in\mathbb{R}^{n\times m}, \qquad \hat{\mathbf{x}}^+ = \hat{\mathbf{x}}^- + K(\mathbf{z} - H\hat{\mathbf{x}}^-)$$
+<p>Substituting the model, the error after correction is</p>
+$$\mathbf{e}^+ = \mathbf{x} - \hat{\mathbf{x}}^+ = (I - KH)\mathbf{e}^- - K\boldsymbol\varepsilon, \qquad E[\mathbf{e}^-] = 0,\ E[\boldsymbol\varepsilon] = 0,\ E[\mathbf{e}^-\boldsymbol\varepsilon^\T] = 0$$
+<p>Take the outer product's expectation. With $A = I - KH$ the two cross terms vanish (prediction error and observation noise are uncorrelated), leaving the <b>Joseph form</b>:</p>
+$$P^+ = E[(A\mathbf{e}^- - K\boldsymbol\varepsilon)(A\mathbf{e}^- - K\boldsymbol\varepsilon)^\T] = (I - KH)P^-(I - KH)^\T + KRK^\T$$
+<p>Expanding the product and introducing the <b>innovation</b> and its covariance,</p>
+$$\boldsymbol\nu = \mathbf{z} - H\hat{\mathbf{x}}^- = H\mathbf{e}^- + \boldsymbol\varepsilon, \qquad S = E[\boldsymbol\nu\boldsymbol\nu^\T] = HP^-H^\T + R$$
+$$P^+ = P^- - KHP^- - P^-H^\T K^\T + KSK^\T$$
+<h3>Minimizing each state's variance</h3>
+<p>The $(i,i)$ entry is the variance of state $i$. Let $\mathbf{k}_i^\T$ be row $i$ of $K$ and $\mathbf{p}_i$ column $i$ of $P^-$; then $(KHP^-)_{ii} = \mathbf{k}_i^\T H\mathbf{p}_i$ is a scalar (1×m · m×n · n×1), and both cross terms equal it:</p>
+$$P^+_{ii} = P^-_{ii} - 2\mathbf{k}_i^\T H\mathbf{p}_i + \mathbf{k}_i^\T S\mathbf{k}_i \;\xrightarrow{\ \partial/\partial\mathbf{k}_i\ }\; -2H\mathbf{p}_i + 2S\mathbf{k}_i = 0 \;\Rightarrow\; \mathbf{k}_i = S^{-1}H\mathbf{p}_i$$
+<p>Stacking the rows ($\mathbf{k}_i^\T = \mathbf{p}_i^\T H^\T S^{-1}$):</p>
+$$\boxed{K = P^-H^\T S^{-1}}$$
+<p>If $S$ is positive definite this is the minimum. With the optimal $K$, $KSK^\T = P^-H^\T K^\T$ and the update simplifies to $P^+ = (I - KH)P^-$. The 1-D gain $P^-/(P^- + R)$ of chapter 4 is the special case $H = 1$.</p>
+<div class="co beyond" data-t="Why implement the Joseph form?"><p>$(I - KH)P^-$ is only valid for the optimal $K$ and, in floating point, can lose symmetry or positive definiteness. The Joseph form is a sum of two positive semidefinite terms for <em>any</em> $K$, so it stays a valid covariance even with rounding or a deliberately suboptimal gain. The lecture uses it in the EKF update (slide 13). Minimizing the trace of $P^+$ gives the same $K$.</p></div>
+
+<h2>The extended Kalman filter</h2>
+<p>The EKF keeps two jobs separate: it <b>evaluates the nonlinear model</b> to move the mean, and it uses a <b>local linearization</b> (Jacobian) to move the covariance. A 1-D picture: a robot drives along a line past a landmark 1 m to the side; the predicted range is</p>
+$$\rho = h_\rho(p) = \sqrt{p^2 + (1\ \mathrm{m})^2} \qquad p: 0 \to 1 \to 2\ \mathrm{m} \;\Rightarrow\; \rho: 1 \to 1.414 \to 2.236\ \mathrm{m}$$
+<p>The EKF approximates how a position error affects the range by the <b>tangent</b> at the current estimate.</p>
+<h3>Motion model and its Jacobian</h3>
+<p>With $\mathbf{u} = [v, \omega]^\T$ and Euler discretization:</p>
+$$f(\mathbf{x}, \mathbf{u}) = \begin{bmatrix} p_x + v\Delta t\cos\theta \\ p_y + v\Delta t\sin\theta \\ \theta + \omega\Delta t \end{bmatrix}, \qquad F = \frac{\partial f}{\partial\mathbf{x}} = \begin{bmatrix} 1 & 0 & -v\Delta t\sin\theta \\ 0 & 1 & v\Delta t\cos\theta \\ 0 & 0 & 1 \end{bmatrix}$$
+$$\hat{\mathbf{x}}^-_k = f(\hat{\mathbf{x}}^+_{k-1}, \mathbf{u}_{k-1}), \qquad P^-_k = F_{k-1}P^+_{k-1}F_{k-1}^\T + Q_{k-1}, \qquad F_{k-1} = \left.\frac{\partial f}{\partial\mathbf{x}}\right|_{\hat{\mathbf{x}}^+_{k-1},\,\mathbf{u}_{k-1}}$$
+<p class="small">The input is known; $Q$ is the covariance of independent additive process noise. Only the heading column is nontrivial: $\partial f_1/\partial\theta = -v\Delta t\sin\theta$, $\partial f_2/\partial\theta = v\Delta t\cos\theta$.</p>
+<div class="co intuition"><p>The off-diagonal heading terms are how a heading error turns into a position error <em>perpendicular to the motion</em>: driving 1 m with a 1° heading error puts you 1.7 cm sideways. Through $F$, the filter learns that correlation automatically — which later lets a position observation correct the heading.</p></div>
+
+<h2>Range–bearing observations and their Jacobian</h2>
+<div class="side wide-r">
+<figure class="fig"><div class="panel">
+<svg class="dia" viewBox="0 0 330 230" width="330" height="230">
+  <defs><marker id="a9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#fb7185"/></marker></defs>
+  <line x1="20" y1="205" x2="320" y2="205" class="ax"/><line x1="20" y1="205" x2="20" y2="10" class="ax"/>
+  <text x="306" y="222" class="m" style="fill:#a3acbd;font-size:13px">x</text><text x="6" y="20" class="m" style="fill:#a3acbd;font-size:13px">y</text>
+  <line x1="70" y1="180" x2="290" y2="40" stroke="#fbbf24" stroke-width="1.6"/>
+  <line x1="70" y1="180" x2="290" y2="180" class="dash"/><line x1="290" y1="180" x2="290" y2="40" class="dash"/>
+  <text x="168" y="196" class="m" style="font-size:13px">d<tspan class="sub" dy="3">x</tspan></text>
+  <text x="296" y="116" class="m" style="font-size:13px">d<tspan class="sub" dy="3">y</tspan></text>
+  <text x="166" y="102" class="m" style="fill:#fbbf24;font-size:14px">ρ</text>
+  <line x1="70" y1="180" x2="138" y2="148.3" stroke="#fb7185" stroke-width="2.2" marker-end="url(#a9)"/>
+  <rect x="58" y="171" width="22" height="16" rx="3" transform="rotate(-25 69 179)" fill="#1c2230" stroke="#c6cdd8"/>
+  <path d="M 112 180 A 42 42 0 0 0 108.1 162.3" fill="none" stroke="#c6cdd8" stroke-width="1.2"/>
+  <text x="117" y="176" class="m" style="font-size:13px">θ</text>
+  <path d="M 142 146.4 A 79 79 0 0 0 135.7 136.5" fill="none" stroke="#fbbf24" stroke-width="1.3"/>
+  <text x="148" y="140" class="m" style="fill:#fbbf24;font-size:13px">φ</text>
+  <circle cx="290" cy="40" r="6" fill="#fbbf24"/>
+  <text x="248" y="30" style="fill:#fbbf24;font-size:12px;font-weight:600">landmark ℓ</text>
+  <text x="40" y="214" class="lbl">robot (p</text><text x="84" y="217" class="lbl" style="font-size:8px">x</text><text x="89" y="214" class="lbl">, p</text><text x="103" y="217" class="lbl" style="font-size:8px">y</text><text x="108" y="214" class="lbl">)</text>
+</svg></div>
+<figcaption>Range ρ and relative bearing φ (measured from the robot's heading θ). The sensor's origin and axes coincide with the robot frame.</figcaption></figure>
+<div>
+<p>With the landmark $\boldsymbol\ell$ fixed and $d_x = \ell_x - p_x$, $d_y = \ell_y - p_y$, $q = d_x^2 + d_y^2 > 0$:</p>
+$$h(\mathbf{x}) = \begin{bmatrix} h_\rho(\mathbf{x}) \\ h_\phi(\mathbf{x}) \end{bmatrix} = \begin{bmatrix} \sqrt{d_x^2 + d_y^2} \\ \wrap\!\left(\operatorname{atan2}(d_y, d_x) - \theta\right) \end{bmatrix}$$
+<p>$\wrap$ normalizes equivalent angles to $[-\pi, \pi)$.</p>
+<p>The landmark is constant, so $\partial d_x/\partial p_x = -1$:</p>
+$$\frac{\partial\rho}{\partial p_x} = \frac{1}{2\sqrt q}\,2d_x(-1) = -\frac{d_x}{\rho}, \qquad \frac{\partial\phi}{\partial p_x} = \frac{-d_y}{q}(-1) = \frac{d_y}{q}$$
+</div>
+</div>
+$$H = \frac{\partial h}{\partial\mathbf{x}} = \begin{bmatrix} -d_x/\rho & -d_y/\rho & 0 \\ d_y/q & -d_x/q & -1 \end{bmatrix} \qquad\begin{array}{l}\text{row 1: range} \\ \text{row 2: bearing}\end{array}$$
+<p>Range does not depend on the heading ($\partial\rho/\partial\theta = 0$); turning the robot changes the bearing one-for-one ($\partial\phi/\partial\theta = -1$).</p>
+
+<h2>An EKF update by hand</h2>
+<div class="co example split" data-t="Worked example · slides 10–13">
+<p>Predicted pose $\hat{\mathbf{x}}^- = [1, 1, 0.2]^\T$, landmark $\boldsymbol\ell = [4, 5]^\T$, measurement $\mathbf{z} = [4.8, 0.8]^\T$, $P^- = \diag(0.16, 0.16, 0.04)$, $R = \diag(0.04, 0.01)$.</p>
+<ol class="steps">
+<li><b>Predicted observation:</b> $d_x = 3$, $d_y = 4$, $q = 25$, $\rho = 5$, $\phi = \operatorname{atan2}(4, 3) - 0.2 = 0.9273 - 0.2 = 0.7273$ → $h(\hat{\mathbf{x}}^-) \approx [5, 0.727]^\T$.</li>
+<li><b>Innovation:</b> $\boldsymbol\nu = [4.8 - 5.0,\ \wrap(0.8 - 0.7273)]^\T \approx [-0.200, 0.073]^\T$ (m, rad).</li>
+<li><b>Jacobian:</b> $H = \begin{bmatrix} -0.60 & -0.80 & 0 \\ 0.16 & -0.12 & -1 \end{bmatrix}$.</li>
+<li><b>Innovation covariance:</b> $S = HP^-H^\T + R = \begin{bmatrix} 0.2000 & 0 \\ 0 & 0.0564 \end{bmatrix}$ (row 1: $0.16(0.36 + 0.64) + 0.04$; row 2: $0.16(0.0256 + 0.0144) + 0.04 + 0.01$).</li>
+<li><b>Gain:</b> $K = P^-H^\T S^{-1} \approx \begin{bmatrix} -0.480 & 0.454 \\ -0.640 & -0.340 \\ 0 & -0.709 \end{bmatrix}$.</li>
+<li><b>Update:</b> e.g. $(K\boldsymbol\nu)_{p_x} = (-0.480)(-0.200) + (0.454)(0.073) \approx 0.129$ m, so $\hat{\mathbf{x}}^+ \approx [1.129, 1.103, 0.148]^\T$.</li>
+<li><b>Covariance (Joseph):</b> $P^+ = (I - KH)P^-(I - KH)^\T + KRK^\T \approx \begin{bmatrix} 0.102 & -0.053 & 0.018 \\ -0.053 & 0.072 & -0.014 \\ 0.018 & -0.014 & 0.012 \end{bmatrix}$ (computed for these notes).</li>
+</ol>
+<p>The measured range is 0.2 m shorter than predicted, so the range part of the gain moves the robot 0.16 m (80 % of the discrepancy) <em>toward</em> the landmark along $(0.6, 0.8)$: +0.096 m in $x$, +0.128 m in $y$. The bearing innovation adds a small sideways shift and a heading correction of −0.052 rad. The update also creates correlations between $x$, $y$ and $\theta$.</p>
+</div>
+<div class="co pitfall" data-t="Watch out · angle wrapping"><p>Always wrap angle differences. If the predicted bearing is $179^\circ$ and the measured one is $-179^\circ$, the raw difference is $-358^\circ$; the true innovation is $\wrap(-358^\circ) = 2^\circ$. Without wrapping the filter would "correct" by almost a full turn.</p></div>
+<figure class="fig"><div class="panel"><img src="fig/l6_track.svg" alt=""></div>
+<figcaption>Re-simulated in the spirit of slide 14 ($\Delta t = 0.2$ s, $\sigma_\rho = 0.15$ m, $\sigma_\phi = 0.04$ rad, odometry with a small yaw-rate bias). Prediction alone drifts; the EKF stays on the true path, and its $x$ error stays inside the ±2σ band computed from $P$ — the sign of a consistent filter.</figcaption></figure>
+
+<h2>The unscented Kalman filter</h2>
+<p>The EKF evaluates $h$ at the mean and uses the slope there. But for a nonlinear function, <b>the function of the mean is not the mean of the function</b>: $h(E[p]) \ne E[h(p)]$. The UKF instead picks a few deterministic <b>sigma points</b> that reproduce the mean and variance exactly, sends each through the full nonlinear function, and recomputes the statistics.</p>
+<div class="co example split" data-t="Worked example · slides 16–20">
+<p>Position $\hat p^- = 1$ m, $P^- = 0.5$ m², range function $h_\rho(p) = \sqrt{p^2 + 1}$, $R = 0.04$ m², measurement $z = 1.6$ m.</p>
+<ol class="steps">
+<li><b>Sigma points</b> $\chi = (1 - s,\ 1,\ 1 + s)$ with weights $W = (\tfrac14, \tfrac12, \tfrac14)$ (same weights for mean and covariance). The mean is 1 by symmetry; the variance fixes the spacing: $\tfrac14s^2 + \tfrac12 \cdot 0 + \tfrac14s^2 = 0.5 \Rightarrow s = 1$, so $\chi = (0, 1, 2)$ m and $\sum_iW_i\chi_i = 1$ m. ✓</li>
+<li><b>Transform:</b> $h(0) = 1$, $h(1) = \sqrt2$, $h(2) = \sqrt5$ m.</li>
+<li><b>Predicted range:</b> $\hat z^- = \tfrac14(1) + \tfrac12\sqrt2 + \tfrac14\sqrt5 \approx 1.516$ m. The EKF would predict $h(1) = \sqrt2 \approx 1.414$ m.</li>
+<li><b>Innovation covariance:</b> $d_i = h(\chi_i) - \hat z^- \approx (-0.516, -0.102, 0.720)$; $S = \sum_iW_id_i^2 + R \approx 0.066596 + 0.005193 + 0.129580 + 0.04 = 0.241369$ m².</li>
+<li><b>Cross-covariance:</b> $C_{pz} = \sum_iW_i(\chi_i - \hat p^-)d_i \approx 0.309017$ m².</li>
+<li><b>Correct:</b> $\nu = 1.6 - 1.516 = 0.083876$ m, $K = C_{pz}/S \approx 1.28027$, $\hat p^+ = 1 + K\nu \approx 1.10738$ m, $P^+ = P^- - KSK^\T \approx 0.10437$ m².</li>
+</ol>
+<p class="small">Here $K$ has unit m/m and exceeds 1 because a range change maps to a larger position change (the slope of $h$ is below 1). $K = C_{pz}S^{-1}$ is the general form of $P^-H^\T S^{-1}$: for linear $h$, $C_{pz} = P^-H^\T$.</p>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l6_ekf_ukf.svg" alt=""></div>
+<figcaption>Left: the range function, the EKF tangent at $\hat p = 1$ and the three sigma points. Right: the true distribution of the predicted range (2 million Monte Carlo samples) has mean 1.517 m and variance 0.200 m²; the UKF (1.516, 0.201) matches it, the EKF (1.414, 0.250) does not.</figcaption></figure>
+<h3>The full UKF cycle</h3>
+<ol class="steps" style="--c: var(--rose)">
+<li><b>Predict the state with $f$:</b> build sigma points from the last corrected distribution, pass each through $f$, compute the weighted mean and covariance, and add $Q$.</li>
+<li><b>Predict the observation with $h$:</b> regenerate sigma points from the predicted distribution, pass them through $h$, compute $\hat{\mathbf{z}}^-$, $S$ (plus $R$) and the cross-covariance $C_{xz}$.</li>
+<li><b>Correct:</b> $K = C_{xz}S^{-1}$, $\hat{\mathbf{x}}^+ = \hat{\mathbf{x}}^- + K(\mathbf{z} - \hat{\mathbf{z}}^-)$, $P^+ = P^- - KSK^\T$. The result feeds the next prediction.</li>
+</ol>
+<p>No Jacobians are needed. Sigma points are <b>not random samples</b> — the same few points give the mean and covariance deterministically. In the lecture's tracking simulation (3-D pose, range–bearing $h$) EKF and UKF both reach a position RMSE of 0.041 m: when the uncertainty is small compared with the curvature of the models, linearization is already good. The UKF pays off when uncertainty is large or the functions bend sharply.</p>
+<div class="co beyond" data-t="Beyond the slides · the general unscented transform"><p>For $n$ states the standard UT uses $2n + 1$ points: $\chi_0 = \hat{\mathbf{x}}$ and $\chi_{\pm i} = \hat{\mathbf{x}} \pm \left(\sqrt{(n + \lambda)P}\right)_i$, with weights $W_0 = \lambda/(n + \lambda)$ and $W_{\pm i} = 1/[2(n + \lambda)]$. The lecture's example is $n = 1$, $\lambda = 1$: spread $\sqrt{2 \times 0.5} = 1$, weights $\tfrac12, \tfrac14, \tfrac14$. The UT is exact for quadratic functions: for $h = p^2$ with $p \sim \mathcal{N}(2, 0.25)$ it returns $E[p^2] = 4.25$, while the EKF returns $h(2) = 4$.</p></div>
+
+<h2>From pose errors to map errors</h2>
+<p>A robot builds a map by transforming each sensor reading into the map frame with the pose at the time of observation. The readings themselves are fixed; if the <b>pose</b> used for the transform is wrong, the mapped points are wrong too, and points of the same wall seen from different poses do not line up (slide 22). Correcting only the current pose does not update map points already stored. The cure: <b>correct the past poses, then transform the stored readings again</b>. That is what pose-graph optimization does.</p>
+
+<h2>Pose-graph optimization: setting up the problem</h2>
+<div class="side wide-l">
+<div>
+<p><b>States.</b> The first pose is fixed as the coordinate reference; the other three are estimated jointly:</p>
+$$\mathbf{x}_i = [p_{x,i}, p_{y,i}, \theta_i]^\T, \qquad \mathbf{x}_0 = [0, 0, 0]^\T, \qquad X = [\mathbf{x}_1^\T, \mathbf{x}_2^\T, \mathbf{x}_3^\T]^\T\in\mathbb{R}^9$$
+<p><b>Measurements</b> are relative poses (forward [m], left [m], rotation [rad]):</p>
+<ul>
+<li>odometry: $\mathbf{z}_{01} = [2.2, 0, 1.6581]^\T$, $\mathbf{z}_{12} = [2.1, 0, 2.4435]^\T$, $\mathbf{z}_{23} = [2.9, 0, 2.3562]^\T$;</li>
+<li><b>loop closure</b> on revisiting the start: $\mathbf{z}_{03} = [0, 0, 0]^\T$.</li>
+</ul>
+<p>The initial trajectory $X^{(0)}$ is the accumulated odometry (a stored filter trajectory could also serve): $\mathbf{x}_1^{(0)} = (2.200, 0.000, 1.658)$, $\mathbf{x}_2^{(0)} = (2.017, 2.092, -2.182)$, $\mathbf{x}_3^{(0)} = (0.354, -0.284, 0.175)$.</p>
+</div>
+<figure class="fig"><div class="panel">
+<svg class="dia" viewBox="0 0 300 280" width="300" height="280">
+  <line x1="50" y1="220" x2="248" y2="220" stroke="#60a5fa" stroke-width="2"/>
+  <line x1="248" y1="220" x2="231.5" y2="31.7" stroke="#60a5fa" stroke-width="2"/>
+  <line x1="231.5" y1="31.7" x2="81.9" y2="245.6" stroke="#60a5fa" stroke-width="2"/>
+  <line x1="50" y1="220" x2="81.9" y2="245.6" stroke="#fbbf24" stroke-width="2.2" stroke-dasharray="5 4"/>
+  <text x="140" y="212" style="fill:#60a5fa;font-size:12px">z₀₁</text>
+  <text x="246" y="128" style="fill:#60a5fa;font-size:12px">z₁₂</text>
+  <text x="126" y="124" style="fill:#60a5fa;font-size:12px">z₂₃</text>
+  <text x="18" y="252" style="fill:#fbbf24;font-size:12px">z₀₃ (loop closure)</text>
+  <circle cx="50" cy="220" r="10" fill="#1c2230" stroke="#c6cdd8" stroke-width="2"/><text x="46" y="224" class="ttl">0</text>
+  <circle cx="248" cy="220" r="10" fill="#1c2230" stroke="#fb7185" stroke-width="2"/><text x="244" y="224" class="ttl">1</text>
+  <circle cx="231.5" cy="31.7" r="10" fill="#1c2230" stroke="#fb7185" stroke-width="2"/><text x="227.5" y="35.7" class="ttl">2</text>
+  <circle cx="81.9" cy="245.6" r="10" fill="#1c2230" stroke="#fb7185" stroke-width="2"/><text x="77.9" y="249.6" class="ttl">3</text>
+  <text x="18" y="200" class="lbl">fixed</text>
+  <text x="150" y="272" class="lbl">nodes = poses, edges = measurements</text>
+</svg></div>
+<figcaption>The four-pose graph of slides 23–24, drawn at the initial estimate. Odometry edges chain the poses; the loop closure says pose 3 is back at pose 0.</figcaption></figure>
+</div>
+<h3>Observation model and residuals</h3>
+<p>To compare with a measurement, predict the relative motion of pose $b$ seen from pose $a$, expressed in $a$'s frame:</p>
+$$C(\theta) = \begin{bmatrix} \cos\theta & -\sin\theta \\ \sin\theta & \cos\theta \end{bmatrix}, \qquad h_{ab}(\mathbf{x}_a, \mathbf{x}_b) = \begin{bmatrix} C(\theta_a)^\T(\mathbf{p}_b - \mathbf{p}_a) \\ \wrap(\theta_b - \theta_a) \end{bmatrix}, \qquad \mathbf{r}_{ab} = \mathbf{z}_{ab} - h_{ab}$$
+<p>(residual = measurement − prediction, angles wrapped). At the initial trajectory every odometry residual is zero — e.g. $\mathbf{p}_2 - \mathbf{p}_1 = (-0.1830, 2.0920)$ rotated by $-\theta_1 = -1.6581$ gives $h_{12} \approx [2.100, 0, 2.4435]^\T = \mathbf{z}_{12}$ — but the loop closure disagrees: with $\mathbf{x}_0 = 0$, $h_{03} = \mathbf{x}_3$, so $\mathbf{r}_{03} = -\mathbf{x}_3 \approx [-0.3536, 0.2835, -0.1745]^\T$.</p>
+<div class="co key"><p>A zero odometry residual does not mean zero position error — it means the initial trajectory simply <em>is</em> the odometry. All the accumulated drift shows up in the single loop-closure residual.</p></div>
+<h3>Weighting and cost</h3>
+<p>Residuals are scaled by their standard deviations (noise independent per component), then the squared sum is minimized:</p>
+$$D_{ab} = \diag(1/\boldsymbol\sigma_{ab}), \qquad \tilde{\mathbf{r}}_{ab} = D_{ab}\mathbf{r}_{ab}, \qquad \Phi(X) = \frac12\sum_{(a,b)\in\mathcal{E}}\|\tilde{\mathbf{r}}_{ab}(X)\|^2, \quad \mathcal{E} = \{(0,1), (1,2), (2,3), (0,3)\}$$
+<p>Odometry: $\boldsymbol\sigma = (0.15\ \mathrm{m}, 0.15\ \mathrm{m}, 0.08727\ \mathrm{rad})$; loop closure: $(0.05\ \mathrm{m}, 0.05\ \mathrm{m}, 0.03491\ \mathrm{rad})$ — the loop closure is trusted three times more. Initially $\tilde{\mathbf{r}}_{03} \approx (-7.072, 5.671, -5.000)$, so $\Phi(X^{(0)}) \approx \tfrac12(50.01 + 32.16 + 25.00) \approx 53.585$.</p>
+
+<h2>Linearization: Jacobian blocks and sparsity</h2>
+<p><b>Sensitivity.</b> Changing pose 1's heading by $\delta\theta_1 = 0.05$ rad changes the lateral residual of edge 1–2 by about $h_{12,x}\,\delta\theta_1 = 2.1 \times 0.05 = 0.105$ m (the nonlinear model gives 0.10496 m): rotating the reference frame swings the far pose sideways in proportion to its distance. Such partial derivatives fill the Jacobian.</p>
+<p>With $c_a = \cos\theta_a$, $s_a = \sin\theta_a$ and $h_{ab} = [h_x, h_y, h_\theta]^\T$, e.g. $r_y = z_y + s_a(p_{x,b} - p_{x,a}) - c_a(p_{y,b} - p_{y,a})$ gives $\partial r_y/\partial\theta_a = h_x$. The measurement is fixed, so residual partials are the negated model partials:</p>
+$$A_{ab} = \frac{\partial\tilde{\mathbf{r}}_{ab}}{\partial\mathbf{x}_a} = D_{ab}\begin{bmatrix} c_a & s_a & -h_y \\ -s_a & c_a & h_x \\ 0 & 0 & 1 \end{bmatrix}, \qquad B_{ab} = \frac{\partial\tilde{\mathbf{r}}_{ab}}{\partial\mathbf{x}_b} = D_{ab}\begin{bmatrix} -c_a & -s_a & 0 \\ s_a & -c_a & 0 \\ 0 & 0 & -1 \end{bmatrix}$$
+<div class="side wide-r">
+<figure class="fig"><div class="panel"><img src="fig/l6_sparsity.svg" alt=""></div>
+<figcaption>Nonzero 3×3 blocks of $J$ and of $J^\T J$. Pose 1 and pose 3 share no edge, so their block in $J^\T J$ is zero.</figcaption></figure>
+<div>
+<p>Each residual depends on only <b>two</b> poses, so its Jacobian blocks sit in those two pose columns (the fixed reference pose has no columns):</p>
+$$J = \frac{\partial\tilde{\mathbf{r}}}{\partial X} = \begin{bmatrix} B_{01} & 0 & 0 \\ A_{12} & B_{12} & 0 \\ 0 & A_{23} & B_{23} \\ 0 & 0 & B_{03} \end{bmatrix}\in\mathbb{R}^{12\times9}$$
+<p>Rows: edges 01, 12, 23, 03; columns: poses 1, 2, 3.</p>
+</div>
+</div>
+
+<h2>Gauss–Newton iterations and the result</h2>
+<p>Linearize the residuals at the current trajectory and minimize the approximate cost:</p>
+$$\tilde{\mathbf{r}}(X^{(j)} + \boldsymbol\delta) \approx \tilde{\mathbf{r}} + J\boldsymbol\delta, \qquad \Phi_\text{lin}(\boldsymbol\delta) = \tfrac12(\tilde{\mathbf{r}} + J\boldsymbol\delta)^\T(\tilde{\mathbf{r}} + J\boldsymbol\delta) = \tfrac12\tilde{\mathbf{r}}^\T\tilde{\mathbf{r}} + \boldsymbol\delta^\T J^\T\tilde{\mathbf{r}} + \tfrac12\boldsymbol\delta^\T J^\T J\boldsymbol\delta$$
+$$\frac{\partial\Phi_\text{lin}}{\partial\boldsymbol\delta} = J^\T\tilde{\mathbf{r}} + J^\T J\boldsymbol\delta = 0 \;\Rightarrow\; (J^\T J)\boldsymbol\delta = -J^\T\tilde{\mathbf{r}}, \qquad X^{(j+1)} = X^{(j)} + \boldsymbol\delta$$
+<p>$\boldsymbol\delta$ updates all three poses at once (9 numbers); then the nonlinear cost, residuals and Jacobian are re-evaluated.</p>
+<table class="tbl compact">
+  <tr><th></th><th class="c">Pose 1</th><th class="c">Pose 2</th><th class="c">Pose 3</th></tr>
+  <tr><td>first update $\boldsymbol\delta$</td><td class="c">(−0.0461, 0.0170, −0.0507)</td><td class="c">(0.0139, 0.0432, −0.1331)</td><td class="c">(−0.3485, 0.2816, −0.1688)</td></tr>
+  <tr><td>converged $\mathbf{x}^*$</td><td class="c">(2.1493, 0.0129, 1.6106)</td><td class="c">(2.0150, 2.1242, −2.3123)</td><td class="c">(0.0056, −0.0014, 0.0061)</td></tr>
+</table>
+<p>The cost drops $53.585 \to 0.9127$ after the first iteration and converges to $\Phi(X^*) \approx 0.9006$. After optimization the loop-closure residual is $\mathbf{r}^*_{03} \approx (-0.0056, 0.0014, -0.0061)$ — small but <b>not zero</b>: its uncertainty is part of the cost, so the final pose is not forced onto the start; the error is spread over all edges, mostly the less certain odometry edges.</p>
+<figure class="fig"><div class="panel"><img src="fig/l6_pgo.svg" alt=""></div>
+<figcaption>Recomputed for these notes (values agree with slides 32–34 to the rounding of the inputs). Left: initial vs optimized trajectory. Middle: cost per Gauss–Newton iteration. Right: each edge's share of the final cost.</figcaption></figure>
+
+<h2>Rebuilding the map</h2>
+<p>The stored observation points are mapped again with the corrected poses — the robot-frame readings $\mathbf{s}_i$ stay fixed, only the pose used for the transform changes:</p>
+$$\mathbf{m}_i = C(\theta_i)\,\mathbf{s}_i + \mathbf{p}_i$$
+<p>Example: a point seen from pose 2 at $\mathbf{s}_2 \approx (0.0000, 1.4142)$ moves from $(3.175, 1.281)$ to $(3.058, 1.169)$ after optimization.</p>
+<figure class="fig"><div class="panel"><img src="fig/l6_map.svg" alt=""></div>
+<figcaption>Illustration in the style of slide 36: the same stored readings of an L-shaped wall, mapped with the initial and with the optimized poses (the gray wall is for evaluation only — it is not an input to the optimization).</figcaption></figure>
+<div class="co recall" data-t="Summary of the pose-graph example (slide 37)"><p><b>Input:</b> three odometry edges, one loop closure, and stored sensor points. <b>Estimated:</b> position and heading of three poses — 9 variables — by Gauss–Newton. <b>Result:</b> corrected trajectory and reconstructed map, cost 53.585 → 0.9006. Levenberg–Marquardt (chapter 7) adds damping to control the size of the Gauss–Newton step when the linearization is poor.</p></div>
+
+<h2>Formula sheet</h2>
+<div class="fsheet">
+  <div class="f"><div class="n">Innovation and its covariance</div><div class="eq">$\boldsymbol\nu = \mathbf{z} - H\hat{\mathbf{x}}^-,\ \ S = HP^-H^\T + R$</div></div>
+  <div class="f"><div class="n">Kalman gain</div><div class="eq">$K = P^-H^\T S^{-1}\ \ (\text{UKF: } K = C_{xz}S^{-1})$</div></div>
+  <div class="f"><div class="n">Joseph form</div><div class="eq">$P^+ = (I - KH)P^-(I - KH)^\T + KRK^\T$</div></div>
+  <div class="f"><div class="n">Simple form (optimal K)</div><div class="eq">$P^+ = (I - KH)P^- = P^- - KSK^\T$</div></div>
+  <div class="f"><div class="n">EKF predict</div><div class="eq">$\hat{\mathbf{x}}^- = f(\hat{\mathbf{x}}^+, \mathbf{u}),\ \ P^- = FP^+F^\T + Q$</div></div>
+  <div class="f"><div class="n">Unicycle Jacobian</div><div class="eq">$F = \begin{bmatrix} 1 & 0 & -v\Delta t\sin\theta \\ 0 & 1 & v\Delta t\cos\theta \\ 0 & 0 & 1 \end{bmatrix}$</div></div>
+  <div class="f"><div class="n">Range–bearing model</div><div class="eq">$h = \begin{bmatrix} \sqrt q \\ \wrap(\operatorname{atan2}(d_y, d_x) - \theta) \end{bmatrix}$</div></div>
+  <div class="f"><div class="n">Range–bearing Jacobian</div><div class="eq">$H = \begin{bmatrix} -d_x/\rho & -d_y/\rho & 0 \\ d_y/q & -d_x/q & -1 \end{bmatrix}$</div></div>
+  <div class="f"><div class="n">UKF statistics</div><div class="eq">$\hat z = \sum W_ih(\chi_i),\ S = \sum W_id_i^2 + R,\ C_{xz} = \sum W_i(\chi_i - \hat x)d_i$</div></div>
+  <div class="f"><div class="n">Relative-pose model</div><div class="eq">$h_{ab} = \begin{bmatrix} C(\theta_a)^\T(\mathbf{p}_b - \mathbf{p}_a) \\ \wrap(\theta_b - \theta_a) \end{bmatrix},\ \mathbf{r} = \mathbf{z} - h$</div></div>
+  <div class="f"><div class="n">Whitened cost</div><div class="eq">$\Phi = \tfrac12\sum\|D_{ab}\mathbf{r}_{ab}\|^2,\ D = \diag(1/\boldsymbol\sigma)$</div></div>
+  <div class="f"><div class="n">Gauss–Newton step · map</div><div class="eq">$(J^\T J)\boldsymbol\delta = -J^\T\tilde{\mathbf{r}},\ \ \mathbf{m}_i = C(\theta_i)\mathbf{s}_i + \mathbf{p}_i$</div></div>
+</div>
+
+<h2>Practice questions</h2>
+<div class="qa" data-type="concept" data-level="1">
+<div class="q"><p>A filter has 3 states and receives a 2-D range–bearing measurement. Give the sizes of $H$, $R$, $S$, $K$ and $P$. Why must $S$ be invertible, and when could it fail to be?</p></div>
+<div class="a"><p>$H$: 2×3, $R$: 2×2, $S = HP^-H^\T + R$: 2×2, $K = P^-H^\T S^{-1}$: 3×2, $P$: 3×3. $S$ is inverted in the gain; it is positive definite whenever $R$ is (measurement noise in every component). It could become singular only if $R$ had a zero-variance component <em>and</em> the state uncertainty gave no spread in that direction — physically, a "perfect" sensor combined with a perfectly known state.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="derive" data-level="3">
+<div class="q"><p>Starting from $\mathbf{e}^+ = (I - KH)\mathbf{e}^- - K\boldsymbol\varepsilon$, derive the Joseph form and then the optimal gain $K = P^-H^\T S^{-1}$.</p></div>
+<div class="a"><p>$P^+ = E[\mathbf{e}^+\mathbf{e}^{+\T}] = (I - KH)E[\mathbf{e}^-\mathbf{e}^{-\T}](I - KH)^\T - (I - KH)E[\mathbf{e}^-\boldsymbol\varepsilon^\T]K^\T - KE[\boldsymbol\varepsilon\mathbf{e}^{-\T}](I - KH)^\T + KE[\boldsymbol\varepsilon\boldsymbol\varepsilon^\T]K^\T$. The middle terms vanish (uncorrelated), giving $(I - KH)P^-(I - KH)^\T + KRK^\T$.
+Expanding: $P^+ = P^- - KHP^- - P^-H^\T K^\T + K(HP^-H^\T + R)K^\T$. Its $i$-th diagonal entry is $P^-_{ii} - 2\mathbf{k}_i^\T H\mathbf{p}_i + \mathbf{k}_i^\T S\mathbf{k}_i$ (row $\mathbf{k}_i^\T$ of $K$, column $\mathbf{p}_i$ of $P^-$). Setting the gradient $-2H\mathbf{p}_i + 2S\mathbf{k}_i$ to zero gives $\mathbf{k}_i = S^{-1}H\mathbf{p}_i$, i.e. $\mathbf{k}_i^\T = \mathbf{p}_i^\T H^\T S^{-1}$; stacking rows: $K = P^-H^\T S^{-1}$ ($S \succ 0$ makes it a minimum).</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>A unicycle robot at heading $\theta = 30^\circ$ drives with $v = 1$ m/s, $\omega = 0.5$ rad/s, $\Delta t = 0.2$ s. Compute $F$. With $P^+ = \diag(0.01, 0.01, 0.04)$ and $Q = 0$, compute $P^-$ and interpret the new off-diagonal terms.</p></div>
+<div class="a">
+$$F = \begin{bmatrix} 1 & 0 & -0.1 \\ 0 & 1 & 0.1732 \\ 0 & 0 & 1 \end{bmatrix}, \qquad P^- = FP^+F^\T \approx \begin{bmatrix} 0.0104 & -0.0007 & -0.0040 \\ -0.0007 & 0.0112 & 0.0069 \\ -0.0040 & 0.0069 & 0.0400 \end{bmatrix}$$
+<p>The heading variance (0.04 rad²) leaks into position perpendicular to the direction of travel ($-\sin\theta$, $\cos\theta$ weighting), increasing the $x$ and $y$ variances and correlating position with heading. That correlation is what later lets a position measurement correct the heading.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>The robot is predicted at $\hat{\mathbf{x}}^- = [2, -1, \pi/2]^\T$ and sees a landmark at $(6, 2)$. Compute the predicted range and bearing and the Jacobian $H$.</p></div>
+<div class="a"><p>$d_x = 4$, $d_y = 3$, $q = 25$, $\rho = 5$ m. Bearing: $\operatorname{atan2}(3, 4) - \pi/2 = 0.6435 - 1.5708 = -0.9273$ rad (≈ −53°, i.e. to the right of the robot, which faces $+y$).</p>
+$$H = \begin{bmatrix} -4/5 & -3/5 & 0 \\ 3/25 & -4/25 & -1 \end{bmatrix} = \begin{bmatrix} -0.8 & -0.6 & 0 \\ 0.12 & -0.16 & -1 \end{bmatrix}$$
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="1">
+<div class="q"><p>The predicted bearing is 3.10 rad and the measured bearing is −3.10 rad. What innovation should the filter use, and what goes wrong without wrapping?</p></div>
+<div class="a"><p>Raw difference: $-3.10 - 3.10 = -6.20$ rad. Wrapped into $[-\pi, \pi)$: $-6.20 + 2\pi \approx 0.083$ rad (≈ 4.8°) — the two directions are almost the same. Unwrapped, the filter would apply a correction of almost −2π rad, multiplied by the gain into a large, wrong heading (and position) jump.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>Using the lecture's three-point sigma set (weights ¼, ½, ¼), propagate $p \sim \mathcal{N}(2, 0.25)$ through $h(p) = p^2$. Compare the UKF mean with the EKF prediction and the exact value.</p></div>
+<div class="a"><p>Spacing: $\tfrac14s^2 + \tfrac14s^2 = 0.25 \Rightarrow s = 0.7071$; $\chi = (1.2929, 2, 2.7071)$; $h(\chi) = (1.6716, 4, 7.3284)$. UKF mean: $\tfrac14(1.6716) + \tfrac12(4) + \tfrac14(7.3284) = 4.25$. EKF: $h(2) = 4$. Exact: $E[p^2] = \mu^2 + \sigma^2 = 4 + 0.25 = 4.25$. The UKF is exact for a quadratic; the EKF misses the curvature term $\sigma^2$ entirely.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="3">
+<div class="q"><p>For the slide-20 example, an EKF (linearized at $\hat p = 1$, slope $1/\sqrt2$) gives $\hat p^+ = 1.227$ m, $P^+ = 0.069$ m², while the UKF gives 1.107 m and 0.104 m². Explain both differences.</p></div>
+<div class="a"><p><b>Mean:</b> the EKF predicts $\hat z^- = h(1) = 1.414$ m, but the true expected range is 1.517 m (curvature pushes it up). With $z = 1.6$, the EKF's innovation (0.186 m) is more than twice the UKF's (0.084 m), so it over-corrects the position.
+<b>Variance:</b> the EKF assumes the slope 0.707 holds everywhere, so it believes the range is quite informative about position. Over the actual spread ($p$ from about 0 to 2) the slope varies from 0 to 0.89 — near $p = 0$ the range hardly depends on position — so the measurement is less informative than the EKF thinks. The UKF captures this and keeps a larger, more honest posterior variance; the EKF is overconfident.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>Why is the first pose fixed in pose-graph optimization? What would happen to $J^\T J$ otherwise?</p></div>
+<div class="a"><p>All measurements are <b>relative</b> poses, so moving or rotating the entire trajectory rigidly leaves every residual — and the cost — unchanged (gauge freedom). Without an anchor, $J^\T J$ has a 3-dimensional null space (two translations and one rotation in 2-D), is singular, and the Gauss–Newton system has no unique solution. Fixing $\mathbf{x}_0$ (or adding a prior on it) removes that freedom and defines the map frame.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>In the four-pose example, how many unknowns and scalar residuals are there, and what are the sizes of $J$ and $J^\T J$? What would the optimization return if the loop closure were removed?</p></div>
+<div class="a"><p>Unknowns: 3 poses × 3 = 9. Residuals: 4 edges × 3 = 12. $J$: 12×9, $J^\T J$: 9×9. Without the loop closure there are 9 residuals for 9 unknowns and the odometry chain fits them exactly: the cost is already 0 at the initial (dead-reckoned) trajectory, and the optimizer returns it unchanged — all drift remains. Redundant measurements such as loop closures are what make correction possible.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="1">
+<div class="q"><p>Whiten the initial loop-closure residual $(-0.3536, 0.2835, -0.1745)$ with $\boldsymbol\sigma = (0.05, 0.05, 0.03491)$ and compute its cost contribution. Why does it dominate?</p></div>
+<div class="a"><p>$\tilde{\mathbf{r}}_{03} = (-7.072, 5.670, -5.00)$; cost $\tfrac12(50.0 + 32.1 + 25.0) \approx 53.6$ — all of $\Phi(X^{(0)})$, because the odometry residuals are zero at the start. Dividing by small σ (a precise loop closure) inflates the residual to 5–7 "standard deviations", which signals a strong inconsistency the optimizer must resolve.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>How would the optimized trajectory change if the loop-closure σ were made 10 times smaller? 10 times larger?</p></div>
+<div class="a"><p><b>10× smaller</b> (much more trusted): its weight grows 100×, so pose 3 is pulled almost exactly onto the start and nearly all the correction is spread over the odometry edges. <b>10× larger</b>: the loop closure barely matters; the solution stays close to the odometry chain and the final pose stays away from the start. The weights express relative trust; wrong σ values (e.g. an overconfident false loop closure) can distort the whole map, which is why robust losses and outlier checks are used in practice.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>Verify the slide-28 sensitivity: with $h_{12,x} = 2.1$ m, by how much does $r_{12,y}$ change for $\delta\theta_1 = 0.05$ rad, and why is the derivative equal to $h_x$?</p></div>
+<div class="a"><p>$\Delta r_{12,y} \approx 2.1 \times 0.05 = 0.105$ m (the nonlinear value is 0.10496 m). Rotating frame $a$ by $\delta\theta$ rotates the predicted position of $b$ (seen from $a$) by $-\delta\theta$; a point at forward distance $h_x$ then moves sideways by about $h_x\delta\theta$, and since $r = z - h$, the residual changes by $+h_x\delta\theta$. Formally, $\partial r_y/\partial\theta_a = c_a(p_{x,b} - p_{x,a}) + s_a(p_{y,b} - p_{y,a}) = h_x$.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>Why is the pose-graph Jacobian sparse, and why does that matter for real SLAM systems?</p></div>
+<div class="a"><p>Each measurement involves only two poses, so each block row of $J$ has only two nonzero 3×3 blocks, and $J^\T J$ is nonzero only for pose pairs connected by an edge (plus the diagonal). A real map has thousands of poses but each connects to a few neighbors, so $J^\T J$ is mostly zeros; sparse factorization (e.g. sparse Cholesky) solves the normal equations in close to linear time instead of the cubic cost of a dense solve — the reason large-scale pose graphs are tractable.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>After optimization, why should the map be rebuilt from the stored robot-frame readings $\mathbf{s}_i$, instead of shifting the existing map points?</p></div>
+<div class="a"><p>The pose correction differs from pose to pose (each moves and rotates by a different amount), so no single shift fixes the map; points seen from pose 2 must move with pose 2's correction, points from pose 3 with pose 3's. Keeping the raw readings and re-transforming them with $\mathbf{m}_i = C(\theta_i)\mathbf{s}_i + \mathbf{p}_i$ applies exactly the right correction to each and can be repeated whenever the poses are optimized again (e.g. after another loop closure).</p></div>
+</div><!--/qa-->
+</section>

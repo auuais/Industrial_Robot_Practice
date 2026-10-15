@@ -1,0 +1,501 @@
+<section class="chapter l2" id="ch-l2">
+<header class="ch-head">
+  <div class="ch-bignum">02</div>
+  <div class="ch-kicker">Lecture 2 · Week 2 · Modeling</div>
+  <h1>System modeling and motion analysis</h1>
+  <p class="ch-sub">Coordinate frames and transforms, robot-arm and vehicle kinematics, and how to step a continuous model forward in time.</p>
+</header>
+<div class="glance">
+  <div><div class="gh">After this chapter you can</div><ul>
+    <li>read and build rotation matrices and 4×4 / 3×3 homogeneous transforms; invert and chain them</li>
+    <li>tell a <b>position</b> from a <b>displacement</b> and transform each correctly</li>
+    <li>compute 2-link arm forward kinematics and sensor-to-sensor transforms on a moving arm</li>
+    <li>derive the kinematic bicycle model, its curvature, yaw rate and slip angle β</li>
+    <li>step a model with Euler, midpoint and RK4; read the order of convergence; check Euler stability</li>
+  </ul></div>
+  <div><div class="gh">Slide map</div><ul class="slidemap">
+    <li><span>States, inputs, parameters · what to record</span><span class="sl">s2–4</span></li>
+    <li><span>Cartesian, cylindrical, spherical</span><span class="sl">s5–6</span></li>
+    <li><span>Frames, rotation, homogeneous transforms</span><span class="sl">s7–16</span></li>
+    <li><span>2-link planar arm, sensors on the arm</span><span class="sl">s17–28</span></li>
+    <li><span>Kinematic bicycle model, CG velocity</span><span class="sl">s29–39</span></li>
+    <li><span>Euler · midpoint · RK4 · convergence</span><span class="sl">s40–52</span></li>
+    <li><span>Validity, actuator lag, stability, validation</span><span class="sl">s53–60</span></li>
+  </ul></div>
+</div>
+
+<h2>States, inputs and parameters</h2>
+<p>The whole course describes a system through three kinds of quantities. For the vehicle of this lecture:</p>
+<table class="tbl">
+  <tr><th style="width:16%">Kind</th><th style="width:30%">Symbol</th><th>Meaning</th></tr>
+  <tr><td><b>State</b></td><td>$\mathbf{x} = [X, Y, \psi, v]^\T$</td><td>position, yaw angle, velocity — what the dynamics change</td></tr>
+  <tr><td><b>Input</b></td><td>$\mathbf{u} = [\delta, a]^\T$</td><td>steering angle and acceleration — what we command</td></tr>
+  <tr><td><b>Parameters</b></td><td>$\boldsymbol\theta = [L, \dots]^\T$</td><td>vehicle specs such as the wheelbase — constant</td></tr>
+</table>
+$$\mathbf{x}_{k+1} = f_\mathrm{d}(\mathbf{x}_k, \mathbf{u}_k; \boldsymbol\theta, h)$$
+<p>The discrete model $f_\mathrm{d}$ computes the state $h$ seconds later from the current state and input. To build it you need three kinds of information (slide 3): the <b>structure and motion conditions</b> (which links connect through which joint axes; the vehicle layout and the assumption of no lateral wheel slip), the <b>model parameters</b> (link lengths, wheelbase, sensor mounting pose, joint-angle zero offsets) and <b>measurement data</b> (joint angles, speed, actual steering angle — each with its measurement time). Derive the equations from the structure, then substitute the specs and measurements.</p>
+
+<h3>What to store with every measurement</h3>
+<table class="tbl">
+  <tr><th style="width:22%">Item</th><th>What to record</th><th style="width:30%">Used for</th></tr>
+  <tr><td><b>Timestamp</b></td><td>sensor ID and measurement time; the time reference of each device</td><td>selecting measurements taken at the same time</td></tr>
+  <tr><td><b>Units and frame</b></td><td>units, origin, axis directions; reference point of position and velocity</td><td>coordinate transformation and unit conversion</td></tr>
+  <tr><td><b>Mounting &amp; calibration</b></td><td>sensor mounting position and orientation; calibration values valid at measurement time</td><td>sensor coordinate transformation</td></tr>
+  <tr><td><b>States and inputs</b></td><td>joint angles, vehicle speed; steering <em>command</em> and <em>actual</em> steering angle</td><td>computing position and orientation</td></tr>
+</table>
+<div class="co key"><p>A number without its <b>unit</b>, <b>frame</b> and <b>timestamp</b> cannot be used. Also record the versions of data and configuration files so every result can be traced back to its settings.</p></div>
+
+<h2>Cartesian, cylindrical and spherical coordinates</h2>
+<p>With the same origin and axes, a point can be written in three ways. Range sensors such as LiDAR naturally measure the spherical form.</p>
+<div class="side wide-l">
+<div>
+<p><b>Cylindrical</b> $(r, \alpha, z)$ — $r$ is the distance from the origin to the projection of P on the $xy$-plane:</p>
+$$x = r\cos\alpha, \qquad y = r\sin\alpha$$
+<p><b>Spherical</b> $(\rho, \alpha, \varphi)$ — $\rho$ distance to the point, $\alpha$ azimuth from $+x$, $\varphi$ angle from $+z$:</p>
+$$x = \rho\sin\varphi\cos\alpha,\quad y = \rho\sin\varphi\sin\alpha,\quad z = \rho\cos\varphi$$
+<p>With the <b>elevation</b> $\varepsilon$ measured from the $xy$-plane: $\varepsilon = 90^\circ - \varphi$, so $z = \rho\sin\varepsilon$ and $r = \rho\cos\varepsilon$.</p>
+</div>
+<div class="co example" style="margin:0">
+<p>Point at 2 m, azimuth 30°, 60° from $+z$ (slide 6):</p>
+$$\mathbf{p}_\mathrm{S} = \begin{bmatrix} 2\sin60^\circ\cos30^\circ \\ 2\sin60^\circ\sin30^\circ \\ 2\cos60^\circ \end{bmatrix} \approx \begin{bmatrix} 1.5000 \\ 0.8660 \\ 1.0000 \end{bmatrix}\ \mathrm{m}$$
+<p class="small">Check: $1.5^2 + 0.866^2 + 1^2 = 4 = \rho^2$. ✓</p>
+</div>
+</div>
+<div class="co pitfall"><p>Sensor datasheets differ: some give the angle from the $+z$ axis ($\varphi$), others the elevation from the horizontal plane ($\varepsilon$). Mixing them swaps $\sin$ and $\cos$ — always check which angle you were given.</p></div>
+
+<h2>Frames, poses and rotation matrices</h2>
+<p>Three frames appear everywhere: the <b>World frame G</b> fixed to the workspace, the <b>Body frame B</b> that moves and rotates with the robot, and the <b>Sensor frame S</b> in which a sensor reports its measurements.</p>
+<div class="side wide-r">
+<figure class="fig"><div class="panel">
+<svg class="dia" viewBox="0 0 340 250" width="340" height="250">
+  <defs><marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="context-stroke"/></marker>
+  <marker id="a2g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#8a94a7"/></marker>
+  <marker id="a2t" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#2dd4bf"/></marker>
+  <marker id="a2a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#fbbf24"/></marker>
+  <marker id="a2c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#22d3ee"/></marker></defs>
+  <line x1="36" y1="220" x2="176" y2="220" stroke="#8a94a7" stroke-width="1.4" marker-end="url(#a2g)"/>
+  <line x1="36" y1="220" x2="36" y2="96" stroke="#8a94a7" stroke-width="1.4" marker-end="url(#a2g)"/>
+  <text x="180" y="225" class="m" style="fill:#a3acbd">x<tspan class="sub" dy="3">G</tspan></text>
+  <text x="22" y="92" class="m" style="fill:#a3acbd">y<tspan class="sub" dy="3">G</tspan></text>
+  <text x="20" y="238" class="mr" style="fill:#a3acbd">G</text>
+  <line x1="166" y1="168" x2="266" y2="110.3" stroke="#22d3ee" stroke-width="1.8" marker-end="url(#a2c)"/>
+  <line x1="166" y1="168" x2="124" y2="95.3" stroke="#22d3ee" stroke-width="1.8" marker-end="url(#a2c)"/>
+  <text x="270" y="108" class="m" style="fill:#22d3ee">x<tspan class="sub" dy="3">B</tspan></text>
+  <text x="104" y="92" class="m" style="fill:#22d3ee">y<tspan class="sub" dy="3">B</tspan></text>
+  <text x="162" y="188" class="mr" style="fill:#22d3ee">B</text>
+  <line x1="166" y1="168" x2="226" y2="168" class="dash"/>
+  <path d="M 200 168 A 34 34 0 0 0 195.4 151" fill="none" stroke="#fbbf24" stroke-width="1.3"/>
+  <text x="204" y="161" class="m" style="fill:#fbbf24">ψ</text>
+  <line x1="36" y1="220" x2="162" y2="170" stroke="#2dd4bf" stroke-width="2" marker-end="url(#a2t)"/>
+  <text x="84" y="214" class="m" style="fill:#2dd4bf">t<tspan class="sub" dy="3">GB</tspan></text>
+  <line x1="166" y1="168" x2="296" y2="58" stroke="#fbbf24" stroke-width="2" marker-end="url(#a2a)"/>
+  <text x="214" y="86" class="m" style="fill:#fbbf24">R<tspan class="sub" dy="3">GB</tspan><tspan dy="-3"> p</tspan><tspan class="sub" dy="3">B</tspan></text>
+  <line x1="36" y1="220" x2="296" y2="58" stroke="#a3acbd" stroke-width="1.2" stroke-dasharray="5 4"/>
+  <text x="104" y="160" class="m" style="fill:#c6cdd8">p<tspan class="sub" dy="3">G</tspan></text>
+  <circle cx="300" cy="55" r="4" fill="#f5f7fb"/>
+  <text x="306" y="50" class="mr">P</text>
+</svg></div>
+<figcaption>$\mathbf{p}_\mathrm{G} = R_\mathrm{GB}\,\mathbf{p}_\mathrm{B} + \mathbf{t}_\mathrm{GB}$: rotate the B-coordinates of P into G, then add where B's origin is.</figcaption></figure>
+<div>
+<p>The <b>pose</b> of frame B seen from G is the pair $(R_\mathrm{GB}, \mathbf{t}_\mathrm{GB})$:</p>
+<ul>
+  <li>$R_\mathrm{GB}$ — the directions of B's axes as seen from G;</li>
+  <li>$\mathbf{t}_\mathrm{GB}$ — the position of B's origin, <b>expressed in G</b>.</li>
+</ul>
+$$R_\mathrm{GB} = \begin{bmatrix} \cos\psi & -\sin\psi \\ \sin\psi & \cos\psi \end{bmatrix}$$
+<p>Each <b>column</b> is a unit axis of B written in G: the first column is $x_\mathrm{B}$, the second is $y_\mathrm{B}$.</p>
+</div>
+</div>
+<p>With a common origin a point transforms as $\mathbf{p}_\mathrm{G} = R_\mathrm{GB}\mathbf{p}_\mathrm{B}$. Rotation matrices are orthonormal, so</p>
+$$R_\mathrm{GB}^\T R_\mathrm{GB} = I, \qquad R_\mathrm{BG} = R_\mathrm{GB}^{-1} = R_\mathrm{GB}^\T$$
+<p>Adding the translation gives the general rule $\mathbf{p}_\mathrm{G} = R_\mathrm{GB}\,\mathbf{p}_\mathrm{B} + \mathbf{t}_\mathrm{GB}$ — both terms on the right are vectors expressed in G.</p>
+<div class="co intuition" data-t="Read the subscripts"><p>Read $R_\mathrm{GB}$ as "from B to G": it takes coordinates written in B and returns them written in G. Chains must have matching <b>inner</b> subscripts — $R_\mathrm{GB}R_\mathrm{BE} = R_\mathrm{GE}$ is valid, $R_\mathrm{GB}R_\mathrm{EB}$ is a bug. The same rule checks every product of transforms in this course (and Lecture 3 uses exactly this $T_{AB}$ convention).</p></div>
+
+<h2>Homogeneous transforms: chain, invert, and points vs displacements</h2>
+<p>Rotation and translation fit into one matrix if a point gets an extra coordinate equal to 1 (3D shown; in 2D the matrix is 3×3):</p>
+$$T_\mathrm{AB} = \begin{bmatrix} R_\mathrm{AB} & \mathbf{t}_\mathrm{AB} \\ \mathbf{0}_{1\times3} & 1 \end{bmatrix}, \qquad \tilde{\mathbf{p}}_\mathrm{B} = \begin{bmatrix} x_\mathrm{B} \\ y_\mathrm{B} \\ z_\mathrm{B} \\ 1 \end{bmatrix}, \qquad \tilde{\mathbf{p}}_\mathrm{A} = T_\mathrm{AB}\,\tilde{\mathbf{p}}_\mathrm{B}$$
+<div class="figrow">
+<div class="co formula" data-t="Inverse (slide 12)" style="margin:0">
+<p>Subtract the origin, then multiply by $R^\T$ from the left:</p>
+$$\mathbf{p}_\mathrm{B} = R_\mathrm{AB}^\T\mathbf{p}_\mathrm{A} - R_\mathrm{AB}^\T\mathbf{t}_\mathrm{AB}$$
+$$T_\mathrm{BA} = T_\mathrm{AB}^{-1} = \begin{bmatrix} R_\mathrm{AB}^\T & -R_\mathrm{AB}^\T\mathbf{t}_\mathrm{AB} \\ \mathbf{0} & 1 \end{bmatrix}$$
+</div>
+<div class="co formula" data-t="Composition (slide 18)" style="margin:0">
+<p>Chain frames by multiplying in order:</p>
+$$T_\mathrm{AC} = T_\mathrm{AB}\,T_\mathrm{BC}$$
+$$R_\mathrm{AC} = R_\mathrm{AB}R_\mathrm{BC}, \quad \mathbf{t}_\mathrm{AC} = R_\mathrm{AB}\,\mathbf{t}_\mathrm{BC} + \mathbf{t}_\mathrm{AB}$$
+</div>
+</div>
+<div class="co pitfall"><p>The inverse translation is <b>not</b> $-\mathbf{t}_\mathrm{AB}$. The vector $\mathbf{t}_\mathrm{AB}$ is written in frame A; the inverse needs B's view of A's origin, so it must also be rotated: $-R_\mathrm{AB}^\T\mathbf{t}_\mathrm{AB}$. Negating only works when $R = I$.</p></div>
+
+<h3>Position vectors and displacement vectors</h3>
+<p>If two points P and Q are transformed into A and subtracted, the translation cancels:</p>
+$$\Delta\mathbf{p}_\mathrm{A} = (R_\mathrm{AB}\mathbf{p}_\mathrm{B,Q} + \mathbf{t}_\mathrm{AB}) - (R_\mathrm{AB}\mathbf{p}_\mathrm{B,P} + \mathbf{t}_\mathrm{AB}) = R_\mathrm{AB}\,\Delta\mathbf{p}_\mathrm{B}$$
+<p>A displacement (or velocity, or force) has no location, so only the rotation applies. Homogeneous coordinates handle this automatically: a <b>position</b> gets a last entry 1, a <b>displacement</b> gets 0, which multiplies the translation column by zero.</p>
+$$\tilde{\mathbf{p}} = \begin{bmatrix} \mathbf{p} \\ 1 \end{bmatrix} \ \text{(position)}, \qquad \widetilde{\Delta\mathbf{p}} = \begin{bmatrix} \Delta\mathbf{p} \\ 0 \end{bmatrix} \ \text{(displacement)}$$
+
+<div class="co example" data-t="Worked example · Tool and World frames (slides 15–16, 22)">
+<p>The Tool frame E has its origin at $(0.4, 0.2, 0.3)$ m in the Base frame B and is rotated 90° about $z_\mathrm{B}$:</p>
+$$T_\mathrm{BE} = \begin{bmatrix} 0 & -1 & 0 & 0.4 \\ 1 & 0 & 0 & 0.2 \\ 0 & 0 & 1 & 0.3 \\ 0 & 0 & 0 & 1 \end{bmatrix}$$
+<ol class="steps">
+<li><b>Point</b> $(0.1, 0, 0.05)$ in E: $T_\mathrm{BE}[0.1, 0, 0.05, 1]^\T = [0.4, 0.3, 0.35, 1]^\T$ — rotate to $(0, 0.1, 0.05)$, then add $(0.4, 0.2, 0.3)$.</li>
+<li><b>Displacement</b> $0.1$ m along $+x_\mathrm{E}$: $\Delta\mathbf{p}_\mathrm{B} = R_\mathrm{BE}[0.1, 0, 0]^\T = [0, 0.1, 0]^\T$ m — moving along the tool's $x$-axis means moving along the base's $y$-axis.</li>
+<li><b>Chain to the World</b>: the Base origin is at $(1, 2, 0)$ in G, rotated 90° about $z_\mathrm{G}$. Then $R_\mathrm{GE} = R_\mathrm{GB}R_\mathrm{BE} = R_z(180^\circ)$ and $\mathbf{t}_\mathrm{GE} = R_\mathrm{GB}[0.4, 0.2, 0.3]^\T + [1, 2, 0]^\T = [-0.2, 0.4, 0.3]^\T + [1, 2, 0]^\T = [0.8, 2.4, 0.3]^\T$ m.</li>
+</ol>
+</div>
+
+<h2>Forward kinematics of a 2-link planar arm</h2>
+<div class="side wide-r">
+<figure class="fig"><div class="panel">
+<svg class="dia" viewBox="0 0 320 270" width="320" height="270">
+  <defs><marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#8a94a7"/></marker>
+  <marker id="a3c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#22d3ee"/></marker></defs>
+  <line x1="60" y1="240" x2="150" y2="240" stroke="#8a94a7" stroke-width="1.3" marker-end="url(#a3)"/>
+  <line x1="60" y1="240" x2="60" y2="160" stroke="#8a94a7" stroke-width="1.3" marker-end="url(#a3)"/>
+  <text x="152" y="245" class="m" style="fill:#a3acbd">x<tspan class="sub" dy="3">B</tspan></text>
+  <text x="44" y="158" class="m" style="fill:#a3acbd">y<tspan class="sub" dy="3">B</tspan></text>
+  <line x1="40" y1="252" x2="80" y2="252" stroke="#8a94a7" stroke-width="1.5"/>
+  <path d="M44 252l-6 8M52 252l-6 8M60 252l-6 8M68 252l-6 8M76 252l-6 8" stroke="#5d6880" stroke-width="1"/>
+  <line x1="60" y1="240" x2="189.9" y2="165" stroke="#2b3650" stroke-width="13" stroke-linecap="round"/>
+  <line x1="60" y1="240" x2="189.9" y2="165" stroke="#22d3ee" stroke-width="2"/>
+  <line x1="189.9" y1="165" x2="189.9" y2="55" stroke="#2b3650" stroke-width="13" stroke-linecap="round"/>
+  <line x1="189.9" y1="165" x2="189.9" y2="55" stroke="#22d3ee" stroke-width="2"/>
+  <circle cx="60" cy="240" r="7" fill="#1c2230" stroke="#c6cdd8" stroke-width="2"/>
+  <circle cx="189.9" cy="165" r="7" fill="#1c2230" stroke="#c6cdd8" stroke-width="2"/>
+  <circle cx="189.9" cy="55" r="5" fill="#c6cdd8"/>
+  <line x1="189.9" y1="165" x2="246" y2="132.6" class="dash"/>
+  <path d="M 100 240 A 40 40 0 0 0 94.6 220" fill="none" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="104" y="232" class="m" style="fill:#fbbf24">q<tspan class="sub" dy="3">1</tspan></text>
+  <path d="M 219.3 148 A 34 34 0 0 0 189.9 131" fill="none" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="214" y="132" class="m" style="fill:#fbbf24">q<tspan class="sub" dy="3">2</tspan></text>
+  <text x="112" y="196" class="m" style="fill:#22d3ee">L<tspan class="sub" dy="3">1</tspan></text>
+  <text x="166" y="112" class="m" style="fill:#22d3ee">L<tspan class="sub" dy="3">2</tspan></text>
+  <line x1="189.9" y1="55" x2="189.9" y2="18" stroke="#22d3ee" stroke-width="1.6" marker-end="url(#a3c)"/>
+  <line x1="189.9" y1="55" x2="150" y2="55" stroke="#22d3ee" stroke-width="1.6" marker-end="url(#a3c)"/>
+  <text x="196" y="24" class="m" style="fill:#22d3ee">x<tspan class="sub" dy="3">E</tspan></text>
+  <text x="128" y="52" class="m" style="fill:#22d3ee">y<tspan class="sub" dy="3">E</tspan></text>
+  <text x="198" y="62" class="mr">E</text>
+  <text x="200" y="176" class="mr" style="fill:#a3acbd">1</text>
+  <text x="48" y="264" class="mr" style="fill:#a3acbd">B</text>
+  <text x="222" y="230" class="lbl">q₁ = 30°, q₂ = 60°</text>
+  <text x="222" y="247" class="lbl">φ<tspan class="sub" dy="3">E</tspan><tspan dy="-3"> = q₁ + q₂ = 90°</tspan></text>
+</svg></div>
+<figcaption>Joint angles $\mathbf{q} = [q_1, q_2]^\T$: $q_1$ from the Base $x$-axis to link 1, $q_2$ between link 1 and link 2. Frames sit at the end of each link with $x$ along the link (Base = 0, Tool E = 2).</figcaption></figure>
+<div>
+<p>Each link contributes a rotation by its joint angle followed by a translation of its length along the new $x$-axis:</p>
+$$T_{i-1,i} = \begin{bmatrix} \cos q_i & -\sin q_i & L_i\cos q_i \\ \sin q_i & \cos q_i & L_i\sin q_i \\ 0 & 0 & 1 \end{bmatrix}$$
+<p>Chain them: $T_{02} = T_{01}T_{12}$, i.e. $R_{02} = R_{01}R_{12}$ and $\mathbf{t}_{02} = R_{01}\mathbf{t}_{12} + \mathbf{t}_{01}$.</p>
+<p>In words: <em>transform link 2's displacement into the Base frame and add it to the end of link 1.</em></p>
+</div>
+</div>
+<p>Multiplying out and using $\cos q_1\cos q_2 - \sin q_1\sin q_2 = \cos(q_1+q_2)$:</p>
+$$\mathbf{p}_\mathrm{B,E} = \begin{bmatrix} L_1\cos q_1 + L_2\cos(q_1+q_2) \\ L_1\sin q_1 + L_2\sin(q_1+q_2) \end{bmatrix}, \qquad \varphi_\mathrm{E} = q_1 + q_2$$
+<div class="co example" data-t="Worked example · slides 20–22">
+<p>$L_1 = 0.4$ m, $L_2 = 0.3$ m, $q_1 = 30^\circ$, $q_2 = 60^\circ$:</p>
+$$x = 0.4\cos30^\circ + 0.3\cos90^\circ \approx 0.3464\ \mathrm{m}, \qquad y = 0.4\sin30^\circ + 0.3\sin90^\circ = 0.5000\ \mathrm{m}$$
+$$T_\mathrm{BE} \approx \begin{bmatrix} 0 & -1 & 0.3464 \\ 1 & 0 & 0.5000 \\ 0 & 0 & 1 \end{bmatrix}, \qquad T_\mathrm{GE} = T_\mathrm{GB}T_\mathrm{BE} \approx \begin{bmatrix} -1 & 0 & 0.5000 \\ 0 & -1 & 2.3464 \\ 0 & 0 & 1 \end{bmatrix}$$
+<p>with the Base at $(1, 2)$ in G rotated 90°: $\mathbf{t}_\mathrm{GE} = R_\mathrm{GB}[0.3464, 0.5]^\T + [1, 2]^\T = [-0.5 + 1,\ 0.3464 + 2]^\T$.</p>
+</div>
+<p><b>Error sensitivity.</b> If the model uses a second link 0.01 m longer than reality, with the angles fixed the computed end-effector shifts along link 2:
+$\Delta\mathbf{p}_\mathrm{B,E} = [\cos(q_1+q_2),\ \sin(q_1+q_2)]^\T\Delta L_2$. For $q_1 + q_2 = 90^\circ$ that is $[0, 0.01]^\T$ m — parameter errors map directly into position errors.</p>
+<div class="co beyond" data-t="Beyond the slides · Jacobian and inverse kinematics">
+<p><b>Jacobian.</b> Differentiating $\mathbf{p}_\mathrm{B,E}$ gives how joint errors (or joint velocities) map to the tool:</p>
+$$J(\mathbf{q}) = \begin{bmatrix} -L_1\sin q_1 - L_2\sin(q_1+q_2) & -L_2\sin(q_1+q_2) \\ L_1\cos q_1 + L_2\cos(q_1+q_2) & L_2\cos(q_1+q_2) \end{bmatrix}, \qquad \Delta\mathbf{p} \approx J\,\Delta\mathbf{q}$$
+<p>At $(30^\circ, 60^\circ)$: $J = \begin{bmatrix} -0.5 & -0.3 \\ 0.3464 & 0 \end{bmatrix}$. A 0.5° error in each joint moves the tool by about $(-6.98, 3.02)$ mm. $\det J = L_1L_2\sin q_2$ vanishes when the arm is stretched or folded ($q_2 = 0$ or $180^\circ$): a <b>singularity</b>.</p>
+<p><b>Inverse kinematics</b> (find $\mathbf{q}$ for a target $(x, y)$) by the law of cosines:</p>
+$$\cos q_2 = \frac{x^2 + y^2 - L_1^2 - L_2^2}{2L_1L_2}, \qquad q_1 = \operatorname{atan2}(y, x) - \operatorname{atan2}(L_2\sin q_2,\ L_1 + L_2\cos q_2)$$
+<p>Two solutions exist ($\pm q_2$, elbow up/down); none if $|\cos q_2| > 1$ (outside the workspace annulus $|L_1 - L_2| \le r \le L_1 + L_2$).</p>
+</div>
+
+<h2>Sensors on a moving arm: transform chains and timestamps</h2>
+<p>Sensor S1 is mounted on the Tool (constant mounting transform $T_\mathrm{ES1}$); sensor S2 is fixed to the Base ($T_\mathrm{BS2}$). Only the arm part depends on the joint angles:</p>
+<figure class="fig"><div class="panel">
+<svg class="dia" viewBox="0 0 640 150" width="640" height="150">
+  <defs><marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#8a94a7"/></marker>
+  <marker id="a4a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#fbbf24"/></marker></defs>
+  <rect x="10" y="22" width="70" height="38" rx="9" class="f-surface2" stroke="#8a94a7"/><text x="45" y="46" text-anchor="middle" class="ttl">G</text>
+  <rect x="180" y="22" width="70" height="38" rx="9" class="f-surface2" stroke="#22d3ee"/><text x="215" y="46" text-anchor="middle" class="ttl" style="fill:#22d3ee">B</text>
+  <rect x="370" y="22" width="70" height="38" rx="9" class="f-surface2" stroke="#22d3ee"/><text x="405" y="46" text-anchor="middle" class="ttl" style="fill:#22d3ee">E</text>
+  <rect x="555" y="22" width="70" height="38" rx="9" class="f-surface2" stroke="#a78bfa"/><text x="590" y="46" text-anchor="middle" class="ttl" style="fill:#a78bfa">S1</text>
+  <rect x="370" y="96" width="70" height="38" rx="9" class="f-surface2" stroke="#a78bfa"/><text x="405" y="120" text-anchor="middle" class="ttl" style="fill:#a78bfa">S2</text>
+  <line x1="81" y1="41" x2="178" y2="41" stroke="#8a94a7" stroke-width="1.5" marker-end="url(#a4)"/>
+  <text x="112" y="34" class="m">T<tspan class="sub" dy="3">GB</tspan></text>
+  <line x1="251" y1="41" x2="368" y2="41" stroke="#8a94a7" stroke-width="1.5" marker-end="url(#a4)"/>
+  <text x="282" y="34" class="m">T<tspan class="sub" dy="3">BE</tspan><tspan dy="-3">(q)</tspan></text>
+  <line x1="441" y1="41" x2="553" y2="41" stroke="#8a94a7" stroke-width="1.5" marker-end="url(#a4)"/>
+  <text x="478" y="34" class="m">T<tspan class="sub" dy="3">ES1</tspan></text>
+  <path d="M 215 61 L 215 115 L 368 115" fill="none" stroke="#8a94a7" stroke-width="1.5" marker-end="url(#a4)"/>
+  <text x="250" y="109" class="m">T<tspan class="sub" dy="3">BS2</tspan><tspan dy="-3"> (constant)</tspan></text>
+  <path d="M 441 118 C 520 118, 560 100, 586 64" fill="none" stroke="#fbbf24" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#a4a)"/>
+  <text x="468" y="138" class="lbl" style="fill:#fbbf24">S1 → S2: go back to B, then out to S1</text>
+  <text x="250" y="80" class="lbl">only this arrow changes with the joint angles</text>
+</svg></div>
+<figcaption>Frame graph of slides 23–26. An arrow A → B carries $T_\mathrm{AB}$ (pose of B in A). To express S1 data in S2, walk S2 → B against the arrow (an inverse) and then B → E → S1.</figcaption></figure>
+$$T_\mathrm{BS1}(\mathbf{q}) = T_\mathrm{BE}(\mathbf{q})\,T_\mathrm{ES1}, \qquad T_\mathrm{S2S1}(\mathbf{q}) = T_\mathrm{BS2}^{-1}\,T_\mathrm{BE}(\mathbf{q})\,T_\mathrm{ES1}, \qquad \tilde{\mathbf{p}}_\mathrm{S2} = T_\mathrm{S2S1}(\mathbf{q})\,\tilde{\mathbf{p}}_\mathrm{S1}$$
+<p>Evaluate right to left — start with the matrix nearest the vector — and use the mounting data and the joint angles <b>at measurement time</b>.</p>
+<div class="co example" data-t="Worked example · slides 25–26">
+<p>S1 sits 0.1 m along $+x_\mathrm{E}$; S2 is at $(0.1, 0.2)$ in B; axes of S1/E and of S2/B are parallel; joints at 30° and 60°.</p>
+<ol class="steps">
+<li>$\mathbf{t}_\mathrm{BS1} = R_\mathrm{BE}[0.1, 0]^\T + \mathbf{t}_\mathrm{BE} = [0, 0.1]^\T + [0.3464, 0.5]^\T = [0.3464, 0.6]^\T$, and $R_\mathrm{BS1} = R_\mathrm{BE}$ (90°).</li>
+<li>$T_\mathrm{S2S1} = T_\mathrm{BS2}^{-1}T_\mathrm{BS1}$: rotation stays 90°, translation $[0.3464 - 0.1,\ 0.6 - 0.2]^\T = [0.2464, 0.4]^\T$ (no rotation in $T_\mathrm{BS2}$, so the inverse just subtracts).</li>
+<li>S1 measures P at $(0.2, 0)$: $\mathbf{p}_\mathrm{S2} = R_{90}[0.2, 0]^\T + [0.2464, 0.4]^\T = [0, 0.2]^\T + [0.2464, 0.4]^\T = [0.2464, 0.6]^\T$ m.</li>
+</ol>
+</div>
+<h3>Timestamps matter</h3>
+<p>$\tilde{\mathbf{p}}_\mathrm{B}(t_k) = T_\mathrm{BE}(\mathbf{q}(t_k))\,T_\mathrm{ES1}\,\tilde{\mathbf{p}}_\mathrm{S1}(t_k)$ — joint angles from an earlier time describe a different arm pose. In the slide example the sensor and point lie along link 2 (total 0.3 + 0.1 + 0.2 = 0.6 m):</p>
+<table class="tbl compact">
+  <tr><th>Joint-angle time</th><th class="c">$q_1, q_2$</th><th class="num">Point in B [m]</th></tr>
+  <tr><td>measurement time $t_k$</td><td class="c">30.0°, 60.0°</td><td class="num">(0.346410, 0.800000)</td></tr>
+  <tr><td>50 ms earlier</td><td class="c">29.5°, 59.0°</td><td class="num">(0.363848, 0.796764)</td></tr>
+</table>
+<p>$\Delta\mathbf{p}_\mathrm{B} \approx [0.017438, -0.003236]^\T$ m, $\|\Delta\mathbf{p}_\mathrm{B}\|_2 \approx 17.74$ mm — from a 50 ms mismatch alone.</p>
+<div class="co intuition"><p>A quick estimate: position error ≈ (distance from the joint) × (joint speed) × (time error). The point is 0.6 m from joint 2, whose absolute angle $q_1 + q_2$ changed by 1.5° (0.026 rad) in 50 ms → about 16 mm; joint 1 adds a little more. Fast motion, long lever arms and latency all multiply.</p></div>
+
+<h2>The kinematic bicycle model</h2>
+<p>Each left–right wheel pair is merged into one equivalent wheel. $R$ is the rear-axle center, $F$ the front-axle center, $L$ the <b>wheelbase</b> (distance between them) and $\delta$ the steering angle of the equivalent front wheel.</p>
+<div class="side">
+<figure class="fig"><div class="panel">
+<svg class="dia" viewBox="0 0 370 310" width="370" height="310">
+  <defs><marker id="a5c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#22d3ee"/></marker>
+  <marker id="a5g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#4ade80"/></marker></defs>
+  <rect x="58" y="236" width="262" height="28" rx="12" class="f-surface2" stroke="#3a4560"/>
+  <line x1="90" y1="11.6" x2="90" y2="250" class="dash"/>
+  <line x1="90" y1="11.6" x2="290" y2="250" class="dash"/>
+  <line x1="90" y1="11.6" x2="190" y2="250" stroke="#4ade80" stroke-width="1" stroke-dasharray="3 4" opacity=".8"/>
+  <circle cx="90" cy="11.6" r="4" fill="#fbbf24"/>
+  <text x="98" y="17" style="fill:#fbbf24;font-size:12px;font-weight:600">ICR</text>
+  <path d="M 90 51.6 A 40 40 0 0 0 115.7 42.2" fill="none" stroke="#fbbf24" stroke-width="1.3"/>
+  <text x="98" y="68" class="m" style="fill:#fbbf24">δ</text>
+  <text x="58" y="140" class="m" style="fill:#a3acbd">R<tspan class="sub" dy="3">R</tspan></text>
+  <line x1="68" y1="250" x2="112" y2="250" stroke="#c6cdd8" stroke-width="7" stroke-linecap="round"/>
+  <line x1="273.2" y1="264.1" x2="306.8" y2="235.9" stroke="#c6cdd8" stroke-width="7" stroke-linecap="round"/>
+  <line x1="290" y1="250" x2="345" y2="250" class="dash"/>
+  <path d="M 322 250 A 32 32 0 0 0 314.5 229.4" fill="none" stroke="#fbbf24" stroke-width="1.3"/>
+  <text x="326" y="238" class="m" style="fill:#fbbf24">δ</text>
+  <line x1="90" y1="250" x2="160" y2="250" stroke="#22d3ee" stroke-width="2.4" marker-end="url(#a5c)"/>
+  <text x="118" y="230" class="m" style="fill:#22d3ee">v<tspan class="sub" dy="3">R</tspan></text>
+  <circle cx="190" cy="250" r="4.5" fill="#4ade80"/>
+  <line x1="190" y1="250" x2="262" y2="219.8" stroke="#4ade80" stroke-width="2.4" marker-end="url(#a5g)"/>
+  <text x="248" y="212" class="m" style="fill:#4ade80">v<tspan class="sub" dy="3">C</tspan></text>
+  <path d="M 222 250 A 32 32 0 0 0 219.5 237.6" fill="none" stroke="#4ade80" stroke-width="1.3"/>
+  <text x="226" y="247" class="m" style="fill:#4ade80;font-size:12px">β</text>
+  <circle cx="90" cy="250" r="3.5" fill="#f5f7fb"/>
+  <circle cx="290" cy="250" r="3.5" fill="#f5f7fb"/>
+  <text x="84" y="279" class="mr">R</text><text x="185" y="279" class="mr" style="fill:#4ade80">C</text><text x="285" y="279" class="mr">F</text>
+  <line x1="90" y1="288" x2="290" y2="288" stroke="#6f7a8e" stroke-width="1"/>
+  <line x1="90" y1="283" x2="90" y2="293" stroke="#6f7a8e"/><line x1="190" y1="283" x2="190" y2="293" stroke="#6f7a8e"/><line x1="290" y1="283" x2="290" y2="293" stroke="#6f7a8e"/>
+  <text x="128" y="303" class="m" style="font-size:13px">l<tspan class="sub" dy="3">r</tspan></text>
+  <text x="232" y="303" class="m" style="font-size:13px">l<tspan class="sub" dy="3">f</tspan></text>
+</svg></div>
+<figcaption>Left turn with an exaggerated δ. The normals to both wheels meet at the instantaneous center of rotation (ICR); the angle at the ICR equals δ. The CG velocity $v_C$ is perpendicular to the ICR–C line, so it points β away from the body axis.</figcaption></figure>
+<div>
+<p><b>No lateral slip</b> at R: the velocity there points along the wheel.</p>
+$$\mathbf{v}_\mathrm{R}^\mathrm{B} = \begin{bmatrix} v_\mathrm{R} \\ 0 \end{bmatrix} \iff -\sin\psi\,\dot X_\mathrm{R} + \cos\psi\,\dot Y_\mathrm{R} = 0$$
+<p><b>ICR geometry</b> (turning radius $R_\mathrm{R} > 0$):</p>
+$$\tan\delta = \frac{L}{R_\mathrm{R}}, \qquad \dot\psi = \frac{v_\mathrm{R}}{R_\mathrm{R}}$$
+<p><b>Curvature</b> (signed: left +, right −; unit 1/m):</p>
+$$\kappa_\mathrm{R} = \frac{\tan\delta}{L}, \qquad \dot\psi = v_\mathrm{R}\,\kappa_\mathrm{R}, \qquad R_\mathrm{R} = \frac{1}{|\kappa_\mathrm{R}|}$$
+<p>At the same curvature the yaw rate is proportional to speed.</p>
+</div>
+</div>
+<p>The rear-axle velocity is rotated (not translated — it is a vector, like a displacement) into the World frame:</p>
+$$\begin{bmatrix} \dot X_\mathrm{R} \\ \dot Y_\mathrm{R} \end{bmatrix} = \begin{bmatrix} \cos\psi & -\sin\psi \\ \sin\psi & \cos\psi \end{bmatrix}\begin{bmatrix} v_\mathrm{R} \\ 0 \end{bmatrix} \ \Rightarrow\ \dot X_\mathrm{R} = v_\mathrm{R}\cos\psi,\quad \dot Y_\mathrm{R} = v_\mathrm{R}\sin\psi$$
+<div class="co formula" data-t="Continuous-time state equations (slide 34)">
+$$\mathbf{x}_\mathrm{R} = \begin{bmatrix} X_\mathrm{R} \\ Y_\mathrm{R} \\ \psi \\ v_\mathrm{R} \end{bmatrix}, \quad \mathbf{u} = \begin{bmatrix} \delta \\ a_\mathrm{R} \end{bmatrix}, \quad \dot{\mathbf{x}}_\mathrm{R} = \begin{bmatrix} v_\mathrm{R}\cos\psi \\ v_\mathrm{R}\sin\psi \\ \dfrac{v_\mathrm{R}}{L}\tan\delta \\ a_\mathrm{R} \end{bmatrix} = f_\mathrm{c}(\mathbf{x}_\mathrm{R}, \mathbf{u}; L), \quad a_\mathrm{R} = \frac{\mathrm{d}v_\mathrm{R}}{\mathrm{d}t}$$
+</div>
+<p><b>Example (slide 35).</b> $v_\mathrm{R} = 5$ m/s, $\delta = 10^\circ$, $L = 2.5$ m: $\omega = \dot\psi = \frac{5}{2.5}\tan10^\circ \approx 0.352654$ rad/s, $\kappa_\mathrm{R} \approx 0.0705$ 1/m, $R_\mathrm{R} \approx 14.18$ m. With constant inputs the yaw rate is constant and the car drives a circle.</p>
+<div class="co pitfall"><ul>
+<li>$\psi$ is measured from the World $X$-axis to the vehicle's forward direction; $v_\mathrm{R} > 0$ forward, $< 0$ reversing.</li>
+<li>Use $\tan\delta$, not $\delta$ — they only agree for small angles — and radians in code.</li>
+<li>"No lateral slip" is an assumption about the tires. It is what makes this model <em>kinematic</em>; section 2.12 shows where it breaks.</li>
+</ul></div>
+
+<h2>Rear axle or center of gravity? The slip angle β</h2>
+<p>On a rotating rigid body, speed and direction of the velocity depend on the reference point. The CG lies $l_\mathrm{r}$ ahead of the rear axle ($L = l_\mathrm{r} + l_\mathrm{f}$, $\mathbf{r}_\mathrm{RC}^\mathrm{B} = [l_\mathrm{r}, 0]^\T$):</p>
+<ol class="steps" style="--c: var(--cyan)">
+<li>Position: $\mathbf{p}_\mathrm{G,C} = \mathbf{p}_\mathrm{G,R} + R_\mathrm{GB}[l_\mathrm{r}, 0]^\T$.</li>
+<li>Differentiate, including the rotation term: $\dot{\mathbf{p}}_\mathrm{G,C} = v_\mathrm{R}[\cos\psi, \sin\psi]^\T + l_\mathrm{r}\dot\psi[-\sin\psi, \cos\psi]^\T$.</li>
+<li>Back to the body frame: $\mathbf{v}_\mathrm{C}^\mathrm{B} = R_\mathrm{GB}^\T\dot{\mathbf{p}}_\mathrm{G,C} = [v_\mathrm{R},\ l_\mathrm{r}\dot\psi]^\T$ — the CG also moves sideways.</li>
+</ol>
+$$\tan\beta = \frac{l_\mathrm{r}\dot\psi}{v_\mathrm{R}} = \frac{l_\mathrm{r}}{L}\tan\delta \ \Rightarrow\ \beta = \arctan\!\left(\frac{l_\mathrm{r}}{L}\tan\delta\right), \qquad v_\mathrm{R} = v_\mathrm{C}\cos\beta, \qquad \dot\psi = \frac{v_\mathrm{C}\cos\beta}{L}\tan\delta$$
+<p>The CG travels in direction $\psi + \beta$, not $\psi$. <b>Example (slide 39):</b> $L = 2.5$ m, $l_\mathrm{r} = 1.25$ m, $\delta = 10^\circ$, $v_\mathrm{R} = 5$ m/s → $\beta = 5.0384^\circ$, $v_\mathrm{C} = 5.0194$ m/s, $\dot\psi = 0.352654$ rad/s (the body yaw rate is the same at every point).</p>
+<div class="co beyond"><p>Many papers (e.g. Kong et al. 2015, cited on slide 60) write the same model about the CG: $\dot X = v\cos(\psi+\beta)$, $\dot Y = v\sin(\psi+\beta)$, $\dot\psi = \frac{v}{l_\mathrm{r}}\sin\beta$. It is equivalent — from $\mathbf{v}_\mathrm{C}^\mathrm{B}$ above, $v_\mathrm{C}\sin\beta = l_\mathrm{r}\dot\psi$. Choosing the rear axle as reference simply makes $\beta$ disappear from the equations.</p></div>
+
+<h2>From continuous to discrete time: Euler, midpoint, RK4</h2>
+<p>To predict the next state, integrate the rate of change over one step $h = t_{k+1} - t_k$. The input is held constant over the step, but the state still changes inside it:</p>
+$$\mathbf{x}_{k+1} = \mathbf{x}_k + \int_{t_k}^{t_k+h} f_\mathrm{c}(\mathbf{x}(\tau), \mathbf{u}_k; L)\,\mathrm{d}\tau \;=\; f_\mathrm{d}(\mathbf{x}_k, \mathbf{u}_k; L, h)$$
+<p>The integral is rarely solvable in closed form, so we approximate it by sampling the rate of change:</p>
+<table class="tbl">
+  <tr><th style="width:17%">Method</th><th>Rates evaluated</th><th style="width:27%">Update</th><th class="c" style="width:12%">RHS evals</th></tr>
+  <tr><td><b>Forward Euler</b></td><td>$\mathbf{k}_1 = f_\mathrm{c}(\mathbf{x}_k, \mathbf{u}_k)$ — rate at the start, assumed constant</td><td>$\mathbf{x}_k + h\mathbf{k}_1$</td><td class="c">1</td></tr>
+  <tr><td><b>Midpoint</b> (RK2)</td><td>$\mathbf{k}_1$; then $\mathbf{k}_2 = f_\mathrm{c}(\mathbf{x}_k + \tfrac{h}{2}\mathbf{k}_1, \mathbf{u}_k)$ at the estimated midpoint</td><td>$\mathbf{x}_k + h\mathbf{k}_2$</td><td class="c">2</td></tr>
+  <tr><td><b>RK4</b></td><td>$\mathbf{k}_1$ start · $\mathbf{k}_2 = f_\mathrm{c}(\mathbf{x}_k + \tfrac{h}{2}\mathbf{k}_1)$ · $\mathbf{k}_3 = f_\mathrm{c}(\mathbf{x}_k + \tfrac{h}{2}\mathbf{k}_2)$ · $\mathbf{k}_4 = f_\mathrm{c}(\mathbf{x}_k + h\mathbf{k}_3)$</td><td>$\mathbf{x}_k + \tfrac{h}{6}(\mathbf{k}_1 + 2\mathbf{k}_2 + 2\mathbf{k}_3 + \mathbf{k}_4)$</td><td class="c">4</td></tr>
+</table>
+<p class="small">$\mathbf{k}_2$ and $\mathbf{k}_3$ are both at the midpoint time but use different state estimates. RK4's weights 1-2-2-1 are Simpson's rule.</p>
+
+<div class="co example split" data-t="Worked example · one step of h = 0.1 s (slides 42, 44, 52)">
+<p>Initial state $[0, 0, 0, 5]^\T$ (m, m, rad, m/s), $\delta = 10^\circ$, $a = 0$, $L = 2.5$ m.</p>
+<ol class="steps">
+<li><b>Euler:</b> $\mathbf{k}_1 = [5\cos0,\ 5\sin0,\ \tfrac{5}{2.5}\tan10^\circ,\ 0]^\T \approx [5, 0, 0.352654, 0]^\T$, so $\mathbf{x}_1 = \mathbf{x}_0 + 0.1\mathbf{k}_1 \approx [0.500000, 0, 0.035265, 5]^\T$. The car moved straight: $Y_1 = 0$.</li>
+<li><b>Midpoint:</b> $\mathbf{x}_{1/2} = \mathbf{x}_0 + 0.05\mathbf{k}_1 \approx [0.25, 0, 0.017633, 5]^\T$. At that heading, $k_{2,X} = 5\cos(0.0176327) \approx 4.999223$ and $k_{2,Y} = 5\sin(0.0176327) \approx 0.088159$ m/s, so $\mathbf{x}_1 \approx [0.499922, 0.008816, 0.035265, 5]^\T$.</li>
+<li><b>RK4</b> ($Y$ only): $Y_1 = \tfrac{0.1}{6}(0 + 2\cdot0.088159 + 2\cdot0.088159 + 0.176290) \approx 0.008815$ m.</li>
+<li><b>Exact:</b> $Y(0.1) = \tfrac{v}{\omega}(1 - \cos0.0352654) \approx 0.0088154$ m. Euler misses the curvature completely in the first step.</li>
+</ol>
+</div>
+<p>With constant speed and steering the exact solution is a circle ($\psi = \omega t$):</p>
+$$X_\mathrm{R}(t) = \int_0^t v_\mathrm{R}\cos(\omega\tau)\,\mathrm{d}\tau = \frac{v_\mathrm{R}}{\omega}\sin(\omega t), \qquad Y_\mathrm{R}(t) = \frac{v_\mathrm{R}}{\omega}\bigl(1 - \cos(\omega t)\bigr)$$
+<figure class="fig"><div class="panel"><img src="fig/l2_traj.svg" alt=""></div>
+<figcaption>Recomputed for these notes with the lecture's conditions (slides 35, 46). Euler holds the heading of the step start for the whole step, so it always turns too late and ends up outside the true circle.</figcaption></figure>
+
+<h2>Accuracy, cost and the order of convergence</h2>
+<table class="tbl">
+  <tr><th>$h$ [s]</th><th class="num">Euler error [m]</th><th class="num">Midpoint error [m]</th><th class="num">RK4 error [m]</th></tr>
+  <tr><td>0.50</td><td class="num">1.621371</td><td class="num">0.023836</td><td class="num">6.18 × 10⁻⁶</td></tr>
+  <tr><td>0.20</td><td class="num">0.648313</td><td class="num">0.003811</td><td class="num">1.58 × 10⁻⁷</td></tr>
+  <tr><td>0.10</td><td class="num">0.324140</td><td class="num">0.000953</td><td class="num">9.87 × 10⁻⁹</td></tr>
+  <tr><td>0.05</td><td class="num">0.162068</td><td class="num">0.000238</td><td class="num">6.17 × 10⁻¹⁰</td></tr>
+</table>
+<p class="small">Position error after 4 s against the analytical solution. Euler and midpoint columns are the slide's (s48); the RK4 column was computed for these notes (the slide gives only the 0.5 s value).</p>
+<p>For small $h$ the error behaves like a power of the step size:</p>
+$$E(h) \approx C\,h^p \quad\Rightarrow\quad \frac{E(h/2)}{E(h)} \approx 2^{-p}, \qquad p \approx \log_2\frac{E(h)}{E(h/2)}$$
+<p>Euler: $0.162068 / 0.324140 \approx 0.50 \Rightarrow p = 1$. Midpoint: $0.000238 / 0.000953 \approx 0.25 \Rightarrow p = 2$. RK4: ratio $\approx 1/16 \Rightarrow p = 4$. This holds only when $h$ is small and the scheme is stable.</p>
+<figure class="fig"><div class="panel"><img src="fig/l2_conv.svg" alt="" style="max-width:78%"></div>
+<figcaption>On log–log axes $E = Ch^p$ is a straight line whose slope is the order $p$ (dotted lines: ideal slopes).</figcaption></figure>
+<p><b>Cost</b> is counted in evaluations of the right-hand side (RHS) $f_\mathrm{c}$. A 4 s horizon with $h = 0.1$ s takes $N = H/h = 40$ steps: Euler 40, midpoint 80, RK4 160 evaluations. Real run time also depends on how expensive $f_\mathrm{c}$ is and on the implementation.</p>
+<div class="co intuition" data-t="Compare at equal cost, not equal step"><p>Spend 40 evaluations over 4 s each way: Euler with $h = 0.1$ s ends 0.32 m off; RK4 with $h = 0.4$ s (10 steps × 4) ends about 2.5 µm off. Higher order wins by orders of magnitude whenever the solution is smooth — which is why RK4 is the default for simulation.</p></div>
+
+<h2>Numerical stability: the steering-actuator example</h2>
+<p>The real steering angle lags the command. A <b>first-order response model</b> with time constant $\tau$:</p>
+$$\tau\,\dot\delta_\mathrm{actual} + \delta_\mathrm{actual} = \delta_\mathrm{cmd}$$
+<p>After a step in the command, the response covers about 63.2 % ($1 - e^{-1}$) of the change in one $\tau$. With $\tau = 0.4$ s and a step from 0° to 10° at $t = 0.5$ s, $\delta_\mathrm{actual}(0.9) \approx 6.32^\circ$. Record the command and the actual angle separately, each with its own timestamp.</p>
+<p>For a constant command, write the error $e = \delta_\mathrm{actual} - \delta_\mathrm{cmd}$, so $\dot e = -e/\tau$. One Euler step multiplies the error by an <b>amplification factor</b>:</p>
+$$e_{k+1} = e_k + h\left(-\frac{e_k}{\tau}\right) = \left(1 - \frac{h}{\tau}\right)e_k, \qquad \left|1 - \frac{h}{\tau}\right| < 1 \;\Rightarrow\; 0 < h < 2\tau$$
+<figure class="fig"><div class="panel"><img src="fig/l2_stab.svg" alt=""></div>
+<figcaption>Left: the actuator response (slide 56). Right: Euler with factor +0.5 is smooth, −0.5 oscillates but converges, −1.5 diverges (slide 58 shows the first and last; h = 0.6 s added here).</figcaption></figure>
+<div class="co key"><p>Stability is necessary, not sufficient: with $h = 0.6$ s the solution converges, but it overshoots and oscillates — something a first-order lag never does. Fast dynamics (small $\tau$) force small steps on explicit methods even when the rest of the model is slow.</p></div>
+<div class="co beyond"><p>Such problems are called <b>stiff</b>. The implicit (backward) Euler step $e_{k+1} = e_k - \frac{h}{\tau}e_{k+1}$ gives $e_{k+1} = e_k/(1 + h/\tau)$, which decays for <em>any</em> $h > 0$, at the price of solving an equation each step.</p></div>
+
+<h2>Where the kinematic model stops working, and how to validate a model</h2>
+<p>The <b>normal acceleration</b> is the component perpendicular to the path tangent: $a_\mathrm{n} = v_\mathrm{C}^2|\kappa_\mathrm{C}| = v_\mathrm{C}^2 / R_\mathrm{C}$. At $R_\mathrm{C} = 20$ m it is 1.25 m/s² at 5 m/s but 11.25 m/s² at 15 m/s — three times the speed, nine times the acceleration.</p>
+<p>Tires need slip angles to produce that lateral force, which violates the no-slip assumption. Polack et al. (cited on slide 54) used the criterion</p>
+$$a_y = \frac{v_\mathrm{C}^2}{R_\mathrm{C}} \le 0.5\,\mu g$$
+<p>for their vehicle and conditions ($\mu$ road friction coefficient, $g$ gravity). With $\mu = 1$ the limit is 4.9 m/s², so on a 20 m radius the kinematic model is trustworthy only up to $v \approx \sqrt{4.9 \cdot 20} \approx 9.9$ m/s. Beyond that, a dynamic model with tire forces is needed (Week 12).</p>
+<h3>Validating with recorded driving data</h3>
+<p>Start from the measured initial state, feed the <b>recorded</b> steering and acceleration in time order, and compare $j$ steps ahead:</p>
+$$e_{k,j} = \bigl\|\mathbf{p}_{\mathrm{meas},k+j} - \hat{\mathbf{p}}_{k+j|k}\bigr\|_2$$
+<p>where $k$ is the step where the prediction starts. Check that positions are compared at the same reference point and frame, at the same times and from the same initial state, and record the settings (parameters, step, data interval, horizon). In real-time use the future inputs must be assumed or planned instead of recorded.</p>
+<table class="tbl compact">
+  <tr><th>Prediction horizon [s]</th><th class="num">0.2</th><th class="num">0.4</th><th class="num">0.6</th><th class="num">0.8</th></tr>
+  <tr><td>Mean position error [m]</td><td class="num">0.08</td><td class="num">0.16</td><td class="num">0.27</td><td class="num">0.40</td></tr>
+  <tr><td>Std. dev. [m]</td><td class="num">0.04</td><td class="num">0.06</td><td class="num">0.11</td><td class="num">0.19</td></tr>
+</table>
+<p class="small">Kong et al. (2015), Hyundai Azera data, kinematic model, Euler with 100 ms steps (slide 60). The errors include model mismatch and measurement error, and grow with the horizon because errors in heading integrate into position.</p>
+
+<h2>Formula sheet</h2>
+<div class="fsheet">
+  <div class="f"><div class="n">Spherical → Cartesian</div><div class="eq">$x = \rho\sin\varphi\cos\alpha,\ y = \rho\sin\varphi\sin\alpha,\ z = \rho\cos\varphi$</div></div>
+  <div class="f"><div class="n">Point transform</div><div class="eq">$\mathbf{p}_\mathrm{A} = R_\mathrm{AB}\mathbf{p}_\mathrm{B} + \mathbf{t}_\mathrm{AB},\ \ \tilde{\mathbf{p}}_\mathrm{A} = T_\mathrm{AB}\tilde{\mathbf{p}}_\mathrm{B}$</div></div>
+  <div class="f"><div class="n">Inverse</div><div class="eq">$T_\mathrm{AB}^{-1} = \begin{bmatrix} R^\T & -R^\T\mathbf{t} \\ \mathbf{0} & 1 \end{bmatrix}$</div></div>
+  <div class="f"><div class="n">Composition</div><div class="eq">$T_\mathrm{AC} = T_\mathrm{AB}T_\mathrm{BC},\ \mathbf{t}_\mathrm{AC} = R_\mathrm{AB}\mathbf{t}_\mathrm{BC} + \mathbf{t}_\mathrm{AB}$</div></div>
+  <div class="f"><div class="n">2-link forward kinematics</div><div class="eq">$\mathbf{p} = \begin{bmatrix} L_1c_1 + L_2c_{12} \\ L_1s_1 + L_2s_{12} \end{bmatrix},\ \varphi_\mathrm{E} = q_1 + q_2$</div></div>
+  <div class="f"><div class="n">Displacement vs position</div><div class="eq">$\Delta\mathbf{p}_\mathrm{A} = R_\mathrm{AB}\Delta\mathbf{p}_\mathrm{B};\ \ w = 0\ \text{vs}\ w = 1$</div></div>
+  <div class="f"><div class="n">Bicycle model (rear axle)</div><div class="eq">$\dot X = v\cos\psi,\ \dot Y = v\sin\psi,\ \dot\psi = \frac{v}{L}\tan\delta,\ \dot v = a$</div></div>
+  <div class="f"><div class="n">Curvature · radius</div><div class="eq">$\kappa = \frac{\tan\delta}{L},\ \dot\psi = v\kappa,\ R = \frac{1}{|\kappa|}$</div></div>
+  <div class="f"><div class="n">Slip angle at the CG</div><div class="eq">$\beta = \arctan\!\left(\frac{l_\mathrm{r}}{L}\tan\delta\right),\ v_\mathrm{R} = v_\mathrm{C}\cos\beta$</div></div>
+  <div class="f"><div class="n">Normal acceleration</div><div class="eq">$a_\mathrm{n} = \frac{v^2}{R},\ \ \text{kinematic if}\ a_y \le 0.5\mu g$</div></div>
+  <div class="f"><div class="n">Euler · midpoint</div><div class="eq">$\mathbf{x}_k + h\mathbf{k}_1;\ \ \mathbf{x}_k + h f(\mathbf{x}_k + \tfrac{h}{2}\mathbf{k}_1)$</div></div>
+  <div class="f"><div class="n">RK4</div><div class="eq">$\mathbf{x}_k + \tfrac{h}{6}(\mathbf{k}_1 + 2\mathbf{k}_2 + 2\mathbf{k}_3 + \mathbf{k}_4)$</div></div>
+  <div class="f"><div class="n">Order of convergence</div><div class="eq">$E \approx Ch^p,\ \ p \approx \log_2\frac{E(h)}{E(h/2)}$</div></div>
+  <div class="f"><div class="n">First-order lag · Euler stability</div><div class="eq">$\tau\dot\delta + \delta = \delta_\mathrm{cmd};\ \ |1 - h/\tau| < 1$</div></div>
+</div>
+
+<h2>Practice questions</h2>
+<div class="qa" data-type="concept" data-level="1">
+<div class="q"><p>What do the columns of $R_\mathrm{GB}$ represent, and why is $R_\mathrm{GB}^{-1} = R_\mathrm{GB}^\T$?</p></div>
+<div class="a"><p>Column $i$ is the unit vector of B's $i$-th axis written in G coordinates (first column $x_\mathrm{B}$, second $y_\mathrm{B}$). Because these axes are unit length and mutually perpendicular, $R^\T R$ is the matrix of their dot products: 1 on the diagonal, 0 elsewhere, i.e. $R^\T R = I$, so $R^\T$ is the inverse. Geometrically, $R^\T$ undoes the rotation, giving $R_\mathrm{BG}$.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>In 2D, $T_\mathrm{AB}$ has a rotation of 30° and translation $\mathbf{t}_\mathrm{AB} = (2, 1)$. Write $T_\mathrm{BA}$ numerically, and say what the common mistake would give.</p></div>
+<div class="a">
+$$R^\T = \begin{bmatrix} 0.8660 & 0.5 \\ -0.5 & 0.8660 \end{bmatrix},\quad -R^\T\mathbf{t} = -\begin{bmatrix} 0.866\cdot2 + 0.5\cdot1 \\ -0.5\cdot2 + 0.866\cdot1 \end{bmatrix} = \begin{bmatrix} -2.2321 \\ 0.1340 \end{bmatrix}$$
+$$T_\mathrm{BA} = \begin{bmatrix} 0.8660 & 0.5 & -2.2321 \\ -0.5 & 0.8660 & 0.1340 \\ 0 & 0 & 1 \end{bmatrix}$$
+<p>The common mistake is to use $-\mathbf{t} = (-2, -1)$ as the translation, which ignores that $\mathbf{t}_\mathrm{AB}$ is expressed in A. Check: $T_\mathrm{AB}T_\mathrm{BA} = I$.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="1">
+<div class="q"><p>Using $T_\mathrm{BE}$ of slide 15 (90° about $z$, origin at $(0.4, 0.2, 0.3)$), express the tool's velocity $\mathbf{v}_\mathrm{E} = (0.2, 0, 0)$ m/s in B. Why is the translation not added?</p></div>
+<div class="a"><p>$\mathbf{v}_\mathrm{B} = R_\mathrm{BE}\mathbf{v}_\mathrm{E} = (0, 0.2, 0)$ m/s. A velocity is a free vector like a displacement: it has a direction and magnitude but no location, so moving the origin does not change it. In homogeneous form it carries a 0 as its last entry, which cancels the translation column.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="1">
+<div class="q"><p>A LiDAR reports range 10 m, azimuth 45° and <em>elevation</em> 10°. Find the Cartesian point in the sensor frame.</p></div>
+<div class="a"><p>With elevation, the horizontal distance is $\rho\cos\varepsilon = 10\cos10^\circ = 9.848$ m. Then $x = 9.848\cos45^\circ \approx 6.964$ m, $y \approx 6.964$ m, $z = \rho\sin\varepsilon = 10\sin10^\circ \approx 1.736$ m. (Using the polar-angle formula with $\varphi = 10^\circ$ by mistake would put the point almost straight up.)</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="1">
+<div class="q"><p>For the 2-link arm with $L_1 = 0.4$ m, $L_2 = 0.3$ m, compute the end-effector position and orientation for $q_1 = 90^\circ$, $q_2 = -90^\circ$. Sketch to check.</p></div>
+<div class="a"><p>$x = 0.4\cos90^\circ + 0.3\cos0^\circ = 0.3$ m, $y = 0.4\sin90^\circ + 0.3\sin0^\circ = 0.4$ m, $\varphi_\mathrm{E} = q_1 + q_2 = 0^\circ$. Sketch: link 1 points straight up to $(0, 0.4)$, link 2 turns 90° right and points along $+x$ to $(0.3, 0.4)$, with the tool facing $+x$. ✓</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="3">
+<div class="q"><p>Inverse kinematics: find all joint-angle pairs that place the same arm's tool at $(0.3464, 0.5)$ m. Why are there two?</p></div>
+<div class="a">
+$$\cos q_2 = \frac{0.3464^2 + 0.5^2 - 0.4^2 - 0.3^2}{2\cdot0.4\cdot0.3} = \frac{0.37 - 0.25}{0.24} = 0.5 \ \Rightarrow\ q_2 = \pm60^\circ$$
+<p>For $q_2 = +60^\circ$: $q_1 = \operatorname{atan2}(0.5, 0.3464) - \operatorname{atan2}(0.3\sin60^\circ, 0.4 + 0.3\cos60^\circ) = 55.30^\circ - 25.29^\circ = 30^\circ$ (the slide's configuration).
+For $q_2 = -60^\circ$: $q_1 = 55.30^\circ + 25.29^\circ \approx 80.57^\circ$.
+The two solutions are mirror images across the line from the base to the target ("elbow down / elbow up"); both triangles with sides $L_1$, $L_2$ and the base–target distance fit.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>In the slide 25 setup (joints 30°/60°), sensor S1 detects a point at $(0, 0.1)$ m in its own frame. Give its coordinates in B and in S2.</p></div>
+<div class="a"><p>$\tilde{\mathbf{p}}_\mathrm{B} = T_\mathrm{BS1}[0, 0.1, 1]^\T$ with $T_\mathrm{BS1} = \begin{bmatrix} 0 & -1 & 0.3464 \\ 1 & 0 & 0.6 \\ 0 & 0 & 1\end{bmatrix}$: $\mathbf{p}_\mathrm{B} = (-0.1 + 0.3464,\ 0 + 0.6) = (0.2464, 0.6)$ m.
+Since S2 is only translated by $(0.1, 0.2)$ from B: $\mathbf{p}_\mathrm{S2} = (0.1464, 0.4)$ m.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>A camera on a robot arm sees a marker 0.8 m from the base joint while that joint rotates at 30°/s. The joint angles used for the transform are 50 ms old. Estimate the error and propose two fixes.</p></div>
+<div class="a"><p>Error ≈ $r\,\omega\,\Delta t = 0.8 \times 0.5236 \times 0.05 \approx 0.021$ m ≈ 21 mm, in the direction of motion. Fixes: (1) interpolate the joint angles to the image timestamp (requires both streams on one clock with known latency); (2) hardware-trigger the camera from the controller, or reduce the latency; also, measure and compensate any fixed time offset (Lecture 3, temporal calibration).</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="1">
+<div class="q"><p>A car with wheelbase 2.7 m drives at 10 m/s with $\delta = 5^\circ$. Find curvature, turning radius and yaw rate.</p></div>
+<div class="a"><p>$\kappa = \tan5^\circ / 2.7 = 0.08749 / 2.7 \approx 0.0324$ 1/m, $R = 1/\kappa \approx 30.9$ m, $\dot\psi = v\kappa \approx 0.324$ rad/s ≈ 18.6°/s.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>Same car, CG 1.2 m ahead of the rear axle, rear-axle speed 10 m/s. Compute β and the CG speed. In which direction does the CG move?</p></div>
+<div class="a"><p>$\tan\beta = \frac{1.2}{2.7}\tan5^\circ = 0.4444 \times 0.08749 = 0.03888 \Rightarrow \beta \approx 2.23^\circ$. $v_\mathrm{C} = v_\mathrm{R}/\cos\beta \approx 10.008$ m/s. The CG moves at angle $\psi + \beta$, i.e. 2.23° to the left of the body axis (inside the turn), because the body's rotation adds a lateral component $l_\mathrm{r}\dot\psi = 0.389$ m/s at the CG.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>Starting from $[X, Y, \psi, v] = [0, 0, 0, 10]$, $\delta = 5^\circ$, $a = 0$, $L = 2.7$ m, do one step of $h = 0.2$ s with Euler and with the midpoint method.</p></div>
+<div class="a"><p>$\dot\psi = 0.32403$ rad/s. <b>Euler:</b> $\mathbf{x}_1 = [2.0,\ 0,\ 0.064806,\ 10]$.
+<b>Midpoint:</b> $\psi_{1/2} = 0.1 \times 0.32403 = 0.032403$; rates there: $\dot X = 10\cos0.032403 = 9.99475$, $\dot Y = 10\sin0.032403 = 0.32397$; so $\mathbf{x}_1 = [1.99895,\ 0.064795,\ 0.064806,\ 10]$. The midpoint result already "bends" left by 6.5 cm; Euler does not.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>A simulator's position error after 10 s is 0.08 m with $h = 0.1$ s and 0.02 m with $h = 0.05$ s. What is the order of the method? Predict the error at $h = 0.025$ s.</p></div>
+<div class="a"><p>Ratio $0.02/0.08 = 1/4 = 2^{-2}$, so $p = 2$ (a second-order method such as midpoint). Halving again divides by 4: about 0.005 m. This assumes the step is already small enough to be in the asymptotic regime.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>For a 10 s simulation, compare Euler with $h = 0.01$ s against RK4 with $h = 0.1$ s in cost (RHS evaluations) and in expected accuracy.</p></div>
+<div class="a"><p>Euler: 1000 steps × 1 = 1000 evaluations. RK4: 100 steps × 4 = 400 evaluations. Accuracy: Euler's error scales with $h$, RK4's with $h^4$; for the lecture's vehicle example, Euler at 0.01 s would still be off by roughly 3 cm after 4 s (scaling the 0.05 s value), while RK4 at 0.1 s is off by about $10^{-8}$ m. RK4 is cheaper <em>and</em> far more accurate here; Euler only competes when the RHS is extremely expensive or the solution is not smooth.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>A steering actuator has $\tau = 0.25$ s. What is the largest stable Euler step? With $h = 0.3$ s and an initial error of −10°, list the errors for three steps and comment.</p></div>
+<div class="a"><p>Stable for $0 < h < 2\tau = 0.5$ s. With $h = 0.3$ s the factor is $1 - 0.3/0.25 = -0.2$: errors −10° → +2° → −0.4° → +0.08°. It converges, but the sign flips every step — an overshoot the real first-order lag never shows. For a qualitatively correct (monotone) response Euler needs $h < \tau$ (factor between 0 and 1).</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>Using the criterion $a_y \le 0.5\mu g$, up to what speed can the kinematic model be used on a curve of radius 50 m when $\mu = 0.8$? Why does the model fail beyond that?</p></div>
+<div class="a"><p>$v_\mathrm{max} = \sqrt{0.5 \times 0.8 \times 9.81 \times 50} \approx 14.0$ m/s ≈ 50 km/h. Beyond it the tires must generate large lateral forces, which requires lateral slip (slip angles); the model's core assumption — velocity along each wheel — no longer holds, so the predicted yaw rate and path become wrong. A dynamic bicycle model with tire forces is then required.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="1">
+<div class="q"><p>Why does model validation feed the <em>recorded</em> inputs into the model, and why does the prediction error in Kong et al.'s table grow with the horizon?</p></div>
+<div class="a"><p>Recorded inputs isolate the model's error: if planned or guessed inputs were used, input errors would be mixed into the comparison. The error grows with the horizon because small heading errors integrate into lateral position errors that keep growing (roughly in proportion to distance), and model mismatch accumulates step after step; that is also why the standard deviation grows.</p></div>
+</div><!--/qa-->
+</section>

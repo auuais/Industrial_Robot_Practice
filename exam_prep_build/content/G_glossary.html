@@ -1,0 +1,94 @@
+<section class="chapter glo" id="ch-glo">
+<header class="ch-head">
+  <div class="ch-bignum">G</div>
+  <div class="ch-kicker">용어집 · Reference</div>
+  <h1>Glossary</h1>
+  <p class="ch-sub">Key terms with the Korean wording used on the original slides, so you can recognize them in Korean exam questions.</p>
+</header>
+<p>The original decks mix Korean and English. Many technical terms appear <b>only in English</b> even in the Korean slides — for example Intrinsic, Extrinsic, Focal Length, Principal Point, Homography, Reprojection Error, Baseline, Disparity, Epipolar Line, Rectification, Time Offset, Rolling Shutter, Odometry, Encoder, Quaternion, Kalman gain, Innovation, Bias, Landmark, Jacobian, Sigma point, Loop closure, Pose, Hessian, Line search, Armijo, Levenberg–Marquardt, KKT, QP and SQP. The table lists the terms that the slides write in Korean.</p>
+
+<h2>Modeling, frames and integration</h2>
+<table class="tbl compact glossary">
+  <tr><th style="width:44%">English</th><th style="width:38%">한국어 (slides)</th><th>Ch.</th></tr>
+  <tr><td>state · input · parameter</td><td>상태 · 입력 · 파라미터</td><td>1, 2</td></tr>
+  <tr><td>coordinate frame / system</td><td>좌표계</td><td>2–6</td></tr>
+  <tr><td>Cartesian · cylindrical · spherical coordinates</td><td>직교좌표 · 원통좌표 · 구면좌표</td><td>2</td></tr>
+  <tr><td>azimuth (angle) · elevation angle</td><td>방위각 · 고도각</td><td>2</td></tr>
+  <tr><td>rotation matrix</td><td>회전행렬</td><td>2, 3</td></tr>
+  <tr><td>homogeneous transformation matrix</td><td>동차변환행렬</td><td>2</td></tr>
+  <tr><td>inverse transformation</td><td>역변환</td><td>2, 3</td></tr>
+  <tr><td>position vector · displacement vector</td><td>위치벡터 · 변위벡터</td><td>2</td></tr>
+  <tr><td>joint angle · link</td><td>관절각 · 링크</td><td>2</td></tr>
+  <tr><td>wheelbase</td><td>축거</td><td>2</td></tr>
+  <tr><td>steering angle · steering command · actual steering angle</td><td>조향각 · 조향명령 · 실제조향각</td><td>2</td></tr>
+  <tr><td>rear-axle center · front-axle center</td><td>후륜축 중심 · 전륜축 중심</td><td>2</td></tr>
+  <tr><td>(no) lateral wheel slip</td><td>바퀴의 횡방향 미끄럼(이 없는 조건)</td><td>2</td></tr>
+  <tr><td>center of gravity (CG)</td><td>무게중심</td><td>2</td></tr>
+  <tr><td>instantaneous center of rotation · turning radius</td><td>순간회전중심 · 회전반경</td><td>2</td></tr>
+  <tr><td>curvature · normal acceleration</td><td>곡률 · 법선가속도</td><td>2</td></tr>
+  <tr><td>numerical integration · midpoint method</td><td>수치적분 · 중점법</td><td>2</td></tr>
+  <tr><td>analytical solution</td><td>해석해</td><td>2</td></tr>
+  <tr><td>order of convergence · computational cost</td><td>수렴차수 · 계산량</td><td>2</td></tr>
+  <tr><td>numerical stability · amplification factor</td><td>수치적 안정성 · 증폭계수</td><td>2</td></tr>
+  <tr><td>first-order response model · steering actuator</td><td>1차 응답 모델 · 조향 구동부</td><td>2</td></tr>
+  <tr><td>prediction horizon · validation</td><td>예측구간 · 검증</td><td>2, 3</td></tr>
+</table>
+
+<h2>Calibration</h2>
+<table class="tbl compact glossary">
+  <tr><th style="width:44%">English</th><th style="width:38%">한국어 (slides)</th><th>Ch.</th></tr>
+  <tr><td>calibration / correction (also KF update)</td><td>보정</td><td>3, 4, 6</td></tr>
+  <tr><td>intrinsic matrix</td><td>내부행렬</td><td>3</td></tr>
+  <tr><td>distortion · distortion coefficients</td><td>왜곡 · 왜곡계수</td><td>3</td></tr>
+  <tr><td>normalized coordinates</td><td>정규화 좌표</td><td>3</td></tr>
+  <tr><td>pattern (geometry) · target</td><td>패턴 (형상) · 표적</td><td>3</td></tr>
+  <tr><td>image feature points</td><td>영상 특징점</td><td>3</td></tr>
+  <tr><td>corresponding points / planes</td><td>대응점 / 대응평면</td><td>3</td></tr>
+  <tr><td>residual · residual covariance</td><td>잔차 · 잔차 공분산</td><td>3</td></tr>
+  <tr><td>symmetric matrix · singular value</td><td>대칭행렬 · 특이값</td><td>3</td></tr>
+  <tr><td>plane · normal (vector)</td><td>평면 · 법선</td><td>3</td></tr>
+  <tr><td>point cloud · depth</td><td>점군 · 깊이</td><td>3</td></tr>
+  <tr><td>initial value · refinement</td><td>초기값 · 정밀화</td><td>3</td></tr>
+  <tr><td>relative (pose) between sensors</td><td>센서 간 상대 (Pose)</td><td>3</td></tr>
+</table>
+
+<h2>Odometry and state estimation</h2>
+<table class="tbl compact glossary">
+  <tr><th style="width:44%">English</th><th style="width:38%">한국어 (slides)</th><th>Ch.</th></tr>
+  <tr><td>wheel · wheel radius · wheel separation</td><td>바퀴 · 바퀴 반지름 · 바퀴 간격</td><td>4</td></tr>
+  <tr><td>travel (distance moved) · rotation angle</td><td>이동량 · 회전각</td><td>4</td></tr>
+  <tr><td>global correction</td><td>전역 보정</td><td>4</td></tr>
+  <tr><td>prediction · correction · observation</td><td>예측 · 보정 · 관측</td><td>4, 6</td></tr>
+  <tr><td>estimate · estimation error</td><td>추정 · 추정오차</td><td>4, 6</td></tr>
+  <tr><td>noise · observation noise · process noise</td><td>잡음 · 관측잡음 · 과정 잡음</td><td>4, 6</td></tr>
+  <tr><td>variance · covariance · cross-covariance</td><td>분산 · 공분산 · 교차공분산</td><td>4, 6</td></tr>
+  <tr><td>standard deviation</td><td>표준편차</td><td>2, 4, 6</td></tr>
+  <tr><td>uncorrelated</td><td>무상관</td><td>4, 6</td></tr>
+  <tr><td>constant-velocity model</td><td>등속도 모델</td><td>4</td></tr>
+  <tr><td>bias</td><td>편향 (L3) / Bias (L4)</td><td>3, 4</td></tr>
+  <tr><td>range · relative bearing</td><td>거리 · (상대) 방위각</td><td>6</td></tr>
+  <tr><td>motion model / function · observation model / function</td><td>운동모델 / 운동함수 · 관측모델 / 관측함수</td><td>4, 6</td></tr>
+  <tr><td>linearization · nonlinear</td><td>선형화 · 비선형</td><td>6, 7</td></tr>
+  <tr><td>positive definite</td><td>양의 정부호</td><td>6, 7</td></tr>
+  <tr><td>weight</td><td>가중치</td><td>3, 6</td></tr>
+  <tr><td>trajectory · map · map reconstruction</td><td>궤적 · 지도 · 지도 재구성</td><td>6</td></tr>
+</table>
+
+<h2>Optimization</h2>
+<table class="tbl compact glossary">
+  <tr><th style="width:44%">English</th><th style="width:38%">한국어 (slides)</th><th>Ch.</th></tr>
+  <tr><td>objective (function)</td><td>목적함수</td><td>7</td></tr>
+  <tr><td>constraint · linear constraint</td><td>제약 · 선형제약</td><td>7</td></tr>
+  <tr><td>equality · inequality</td><td>등식 · 부등식</td><td>7</td></tr>
+  <tr><td>feasible region</td><td>허용영역</td><td>7</td></tr>
+  <tr><td>existence and uniqueness of a solution</td><td>해의 존재와 유일성</td><td>7</td></tr>
+  <tr><td>gradient</td><td>기울기</td><td>7</td></tr>
+  <tr><td>direction · step size · step candidates</td><td>방향 · 이동량 · 이동후보</td><td>7</td></tr>
+  <tr><td>sufficient decrease condition</td><td>충분한 감소 조건</td><td>7</td></tr>
+  <tr><td>approximation · first-order approximation</td><td>근사 · 1차 근사</td><td>6, 7</td></tr>
+  <tr><td>chord (line segment)</td><td>선분</td><td>7</td></tr>
+  <tr><td>identity matrix · inverse matrix · linear system</td><td>단위행렬 · 역행렬 · 선형시스템</td><td>7</td></tr>
+  <tr><td>tolerance</td><td>허용오차</td><td>7</td></tr>
+</table>
+<div class="co tip"><p>Note that <b>이동량</b> means wheel <em>travel</em> in Lecture 4 but <em>step size</em> in Lecture 7, and <b>보정</b> means <em>calibration/correction</em> in Lecture 3 but the Kalman <em>correction (update)</em> step in Lectures 4 and 6 — read the context.</p></div>
+</section>

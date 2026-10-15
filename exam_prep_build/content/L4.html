@@ -1,0 +1,346 @@
+<section class="chapter l4" id="ch-l4">
+<header class="ch-head">
+  <div class="ch-bignum">04</div>
+  <div class="ch-kicker">Lecture 4 · State estimation</div>
+  <h1>Wheel odometry and the Kalman filter</h1>
+  <p class="ch-sub">Predict the pose from wheel travel, express it in ROS frames, then correct the drift with position observations — first on one axis, then for position and velocity together.</p>
+</header>
+<div class="glance">
+  <div><div class="gh">After this chapter you can</div><ul>
+    <li>explain the <b>map → odom → base_link</b> frames and why odometry drifts</li>
+    <li>turn encoder counts into a differential-drive pose update</li>
+    <li>write planar headings as quaternions and fill in a ROS <code>Odometry</code> message</li>
+    <li><b>derive</b> the 1-D Kalman gain and run predict/correct cycles by hand</li>
+    <li>predict how $Q$, $R$ and observation gaps change the estimate and its σ</li>
+    <li>run the position–velocity filter and explain the role of cross-covariance and of a bias</li>
+  </ul></div>
+  <div><div class="gh">Slide map</div><ul class="slidemap">
+    <li><span>odom, base_link, map; drift and correction</span><span class="sl">s1–5</span></li>
+    <li><span>Encoders, differential drive, pose update</span><span class="sl">s6–9</span></li>
+    <li><span>Quaternions, Odometry message, RViz</span><span class="sl">s10–13</span></li>
+    <li><span>Slip: when odometry lies</span><span class="sl">s14</span></li>
+    <li><span>1-D Kalman filter: derivation, cycle, Q/R</span><span class="sl">s15–21</span></li>
+    <li><span>Position–velocity filter</span><span class="sl">s22–27</span></li>
+    <li><span>Bias and observability</span><span class="sl">s28–29</span></li>
+  </ul></div>
+</div>
+
+<h2>Frames for a mobile robot: map, odom, base_link</h2>
+<figure class="fig"><div class="panel">
+<svg class="dia" viewBox="0 0 660 132" width="660" height="132">
+  <defs><marker id="a7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#8a94a7"/></marker></defs>
+  <rect x="8" y="14" width="140" height="62" rx="10" class="f-surface2" stroke="#4ade80"/>
+  <text x="22" y="38" class="ttl" style="fill:#4ade80">map</text>
+  <text x="22" y="56" class="lbl">fixed to the environment</text>
+  <text x="22" y="70" class="lbl">globally right, may jump</text>
+  <rect x="258" y="14" width="140" height="62" rx="10" class="f-surface2" stroke="#fb923c"/>
+  <text x="272" y="38" class="ttl" style="fill:#fb923c">odom</text>
+  <text x="272" y="56" class="lbl">accumulates the motion</text>
+  <text x="272" y="70" class="lbl">smooth, but drifts</text>
+  <rect x="508" y="14" width="144" height="62" rx="10" class="f-surface2" stroke="#fbbf24"/>
+  <text x="522" y="38" class="ttl" style="fill:#fbbf24">base_link</text>
+  <text x="522" y="56" class="lbl">moves and rotates</text>
+  <text x="522" y="70" class="lbl">with the robot body</text>
+  <line x1="149" y1="45" x2="256" y2="45" stroke="#8a94a7" stroke-width="1.5" marker-end="url(#a7)"/>
+  <text x="160" y="36" class="lbl" style="fill:#4ade80">map → odom</text>
+  <text x="160" y="64" class="lbl">from localization</text>
+  <line x1="399" y1="45" x2="506" y2="45" stroke="#8a94a7" stroke-width="1.5" marker-end="url(#a7)"/>
+  <text x="410" y="36" class="lbl" style="fill:#fb923c">odom → base_link</text>
+  <text x="410" y="64" class="lbl">from wheel odometry</text>
+  <text x="8" y="104" class="lbl">At the start odom and base_link coincide: (x₀, y₀, θ₀) = (0, 0, 0). Odometry updates odom → base_link continuously;</text>
+  <text x="8" y="121" class="lbl">a global observation (GNSS, scan matching, landmarks) corrects the robot by publishing a new map → odom transform.</text>
+</svg></div>
+<figcaption>The frame chain used by ROS mobile robots (REP 105). Each frame has one parent, so the localizer corrects the robot through map → odom instead of overwriting odom → base_link.</figcaption></figure>
+<p>The estimated pose in odom <b>accumulates drift</b> while driving, because every small distance or angle error is integrated forever. The lecture's simulation drives a 2 m square with a 2 % distance error and every 90° turn estimated as 95°:</p>
+<figure class="fig"><div class="panel"><img src="fig/l4_drift.svg" alt=""></div>
+<figcaption>Left: true (map) vs estimated (odom) path; gray lines join points at the same time. Middle: the error grows with distance, to 0.48 m back at the start. Right: after the last turn the heading error is 4 × 5° = 20°, so the correction is a −20° rotation plus a translation of (−0.26, 0.41) m (recomputed from slides 3–4).</figcaption></figure>
+<div class="co key"><p>The map → odom correction applies <b>one</b> transform to every stored odom point. It fixes the <em>current</em> pose, but the shape of the past path keeps its error — fixing past poses needs a pose graph (chapter 6).</p></div>
+<p class="small">On the RViz example of slide 5 (Stereolabs ZED camera), the red path is visual odometry accumulated from image motion; the green path is the pose corrected with environment information, both shown in the map frame.</p>
+
+<h2>Wheel odometry: from encoder counts to a pose</h2>
+<p>An encoder counts $N$ ticks per wheel revolution ($N$ already includes the gear ratio and the counting method, e.g. ×4 quadrature). If the wheel rolls without slipping:</p>
+$$\Delta\phi = 2\pi\frac{\Delta c}{N}, \qquad \Delta s = r\,\Delta\phi$$
+<p>Example (slide 6): $r = 0.05$ m, $N = 1000$, $\Delta c = 1300 - 1200 = 100$ → $\Delta\phi = 0.62832$ rad (36°), $\Delta s = 31.416$ mm.</p>
+<div class="side wide-r">
+<figure class="fig"><div class="panel">
+<svg class="dia" viewBox="0 0 300 240" width="300" height="240">
+  <line x1="40" y1="220" x2="240" y2="220" class="dash"/>
+  <line x1="40" y1="220" x2="162.1" y2="74.5" class="dash"/>
+  <path d="M 150 220 A 110 110 0 0 0 110.7 135.7" fill="none" stroke="#22d3ee" stroke-width="2.2"/>
+  <path d="M 190 220 A 150 150 0 0 0 136.4 105.1" fill="none" stroke="#f5f7fb" stroke-width="2.2"/>
+  <path d="M 230 220 A 190 190 0 0 0 162.1 74.5" fill="none" stroke="#fbbf24" stroke-width="2.2"/>
+  <path d="M 72 220 A 32 32 0 0 0 60.6 195.5" fill="none" stroke="#a3acbd" stroke-width="1.3"/>
+  <text x="74" y="206" class="m" style="font-size:13px">Δθ</text>
+  <circle cx="40" cy="220" r="4" fill="#a3acbd"/>
+  <text x="16" y="212" class="lbl">turn center</text>
+  <rect x="140" y="214" width="100" height="12" rx="3" fill="none" stroke="#5d6880"/>
+  <circle cx="150" cy="220" r="3.5" fill="#22d3ee"/><circle cx="190" cy="220" r="3.5" fill="#f5f7fb"/><circle cx="230" cy="220" r="3.5" fill="#fbbf24"/>
+  <text x="102" y="160" class="m" style="fill:#22d3ee;font-size:13px">Δs<tspan class="sub" dy="3">L</tspan></text>
+  <text x="168" y="128" class="m" style="font-size:13px">Δs</text>
+  <text x="214" y="100" class="m" style="fill:#fbbf24;font-size:13px">Δs<tspan class="sub" dy="3">R</tspan></text>
+  <line x1="150" y1="236" x2="230" y2="236" stroke="#6f7a8e"/><line x1="150" y1="231" x2="150" y2="240" stroke="#6f7a8e"/><line x1="230" y1="231" x2="230" y2="240" stroke="#6f7a8e"/>
+  <text x="186" y="234" class="m" style="font-size:12px">b</text>
+</svg></div>
+<figcaption>Differential drive without slip: both wheel paths subtend the same angle Δθ about the turn center (left turn shown, exaggerated).</figcaption></figure>
+<div>
+<p>With wheel separation $b$, the two wheels travel on arcs $b/2$ outside and inside the body center:</p>
+$$\Delta s_R = \Delta s + \frac b2\Delta\theta, \qquad \Delta s_L = \Delta s - \frac b2\Delta\theta$$
+<p>Adding and subtracting:</p>
+$$\Delta s = \frac{\Delta s_R + \Delta s_L}{2}, \qquad \Delta\theta = \frac{\Delta s_R - \Delta s_L}{b}$$
+<p>The sum gives the travel, the difference gives the rotation (Δθ in rad).</p>
+</div>
+</div>
+<p><b>Pose update.</b> If the curvature is constant over a short step, the heading in the <b>middle</b> of the step approximates the travel direction:</p>
+$$\alpha = \theta_k + \frac{\Delta\theta}{2}, \qquad \Delta x \approx \Delta s\cos\alpha, \qquad \Delta y \approx \Delta s\sin\alpha, \qquad \begin{bmatrix} x_{k+1} \\ y_{k+1} \\ \theta_{k+1} \end{bmatrix} = \begin{bmatrix} x_k \\ y_k \\ \theta_k \end{bmatrix} + \begin{bmatrix} \Delta x \\ \Delta y \\ \Delta\theta \end{bmatrix}$$
+<p>If $\Delta\theta = 0$, $\alpha = \theta_k$. For small $\Delta\theta$ the arc length is a good approximation of the straight-line displacement. (This is the midpoint idea of Lecture 2 applied to odometry.)</p>
+<div class="co example" data-t="Worked example · slide 9">
+<p>Initial pose $(0, 0, 0)$, $r = 0.05$ m, $b = 0.30$ m, $N = 1000$; left wheel +100 counts, right wheel +200 counts.</p>
+<ol class="steps">
+<li>$\Delta s_L = 31.416$ mm, $\Delta s_R = 62.832$ mm.</li>
+<li>$\Delta s = 47.124$ mm, $\Delta\theta = (62.832 - 31.416)/300 = 0.10472$ rad $= 6^\circ$.</li>
+<li>Mid heading $\alpha = 3^\circ$: $\Delta x \approx 47.059$ mm, $\Delta y \approx 2.466$ mm.</li>
+<li>New pose $(x, y, \theta) \approx (0.047059\ \mathrm{m},\ 0.002466\ \mathrm{m},\ 6^\circ)$.</li>
+</ol>
+</div>
+<div class="co beyond" data-t="Beyond the slides · the exact arc update"><p>For constant curvature the exact displacement is $\Delta x = \frac{\Delta s}{\Delta\theta}[\sin(\theta_k + \Delta\theta) - \sin\theta_k]$, $\Delta y = -\frac{\Delta s}{\Delta\theta}[\cos(\theta_k + \Delta\theta) - \cos\theta_k]$. For the example it gives (47.038, 2.465) mm — 0.02 mm from the mid-heading result. The mid-heading rule uses the arc length instead of the chord, a negligible difference for small Δθ; that is why it is the standard choice.</p></div>
+
+<h2>Orientation as a quaternion and the ROS Odometry message</h2>
+<p>ROS stores orientation as a unit <b>quaternion</b> in the order $(q_x, q_y, q_z, q_w)$. A rotation by angle $\theta$ about the unit axis $\mathbf{u}$:</p>
+$$(q_x, q_y, q_z) = \mathbf{u}\sin\frac\theta2, \qquad q_w = \cos\frac\theta2, \qquad q_x^2 + q_y^2 + q_z^2 + q_w^2 = 1$$
+<p>No rotation is $q = (0, 0, 0, 1)$. In <b>planar motion</b> (roll = pitch = 0, $\mathbf{u} = (0, 0, 1)$, counter-clockwise from above positive) only $q_z$ and $q_w$ vary:</p>
+$$(q_x, q_y, q_z, q_w) = \left(0,\ 0,\ \sin\frac\theta2,\ \cos\frac\theta2\right)$$
+<table class="tbl compact">
+  <tr><th>Heading</th><th class="c">0°</th><th class="c">90°</th><th class="c">180°</th><th class="c">6° (example)</th></tr>
+  <tr><td>$q$</td><td class="c">(0, 0, 0, 1)</td><td class="c">(0, 0, 0.7071, 0.7071)</td><td class="c">(0, 0, 1, 0)</td><td class="c">(0, 0, 0.052336, 0.998630)</td></tr>
+</table>
+<div class="co pitfall"><ul>
+<li>The <b>half angle</b>: heading 6° uses $\sin3^\circ$ and $\cos3^\circ$. Forgetting the ½ is the most common mistake.</li>
+<li>Code expects <b>radians</b>: $\theta/2 = 3^\circ = \pi/60$ rad.</li>
+<li>The order is $(x, y, z, w)$ in ROS; some libraries put $w$ first.</li>
+<li>$q$ and $-q$ describe the same rotation. For planar motion, $\theta = 2\operatorname{atan2}(q_z, q_w)$.</li>
+</ul></div>
+<p>The computed pose goes into a <code>nav_msgs/Odometry</code> message:</p>
+<table class="tbl compact">
+  <tr><th style="width:36%">Field</th><th>Value (example)</th><th style="width:30%">Meaning</th></tr>
+  <tr><td><code>header.frame_id</code></td><td>odom</td><td>reference frame of the pose</td></tr>
+  <tr><td><code>child_frame_id</code></td><td>base_link</td><td>frame being described; frame of the twist</td></tr>
+  <tr><td><code>pose.pose.position</code></td><td>x: 0.047059, y: 0.002466, z: 0 (m)</td><td>base_link origin in odom</td></tr>
+  <tr><td><code>pose.pose.orientation</code></td><td>x: 0, y: 0, z: 0.052336, w: 0.998630</td><td>direction of base_link in odom</td></tr>
+  <tr><td><code>twist.twist</code></td><td>linear and angular velocity</td><td>expressed in base_link</td></tr>
+</table>
+<p><b>RViz.</b> Displays → Global Options → <b>Fixed Frame</b> sets the frame everything is drawn in. With <code>odom</code> the odometry alone suffices; with <code>map</code> some node must provide the map → odom transform. "Transform OK" in the TF panel means that frame can be displayed relative to the Fixed Frame.</p>
+
+<h2>When odometry lies: slip</h2>
+<p>Both wheels are commanded 0.5 rad/s for 2 s, so the expected travel is $\Delta s_\text{cmd} = r\,\omega_\text{cmd}\Delta t = 0.05$ m. Odometry only sees wheel rotation:</p>
+<table class="tbl">
+  <tr><th>Drive condition</th><th class="c">Measured rotation</th><th class="c">Actual motion</th><th class="c">Odometry estimate</th></tr>
+  <tr><td>driving without slip</td><td class="c">1 rad</td><td class="c">50 mm</td><td class="c">50 mm ✓</td></tr>
+  <tr><td>wheel blocked from turning</td><td class="c">0 rad</td><td class="c">0 mm</td><td class="c">0 mm ✓</td></tr>
+  <tr><td>wheel spinning in place</td><td class="c">1 rad</td><td class="c">0 mm</td><td class="c">50 mm ✗</td></tr>
+</table>
+<div class="co key"><p>The encoder cannot detect spinning (or sliding). Odometry is a <b>model</b> of motion that assumes rolling without slip; correcting it requires an <b>independent position observation</b> — which is what the Kalman filter combines.</p></div>
+
+<h2>The 1-D Kalman filter: models and assumptions</h2>
+<p>With wheel travel and position observations aligned in frame and time, start with one axis:</p>
+<div class="figrow">
+<div class="co formula" data-t="Prediction from wheel travel" style="margin:0">
+$$x_k = x_{k-1} + u_{k-1} + w_{k-1}$$
+<p class="small">$x$ true position, $u$ travel computed from the wheels, $w$ travel error the model does not explain: $E[w] = 0$, $Q = E[w^2]$.</p>
+</div>
+<div class="co formula" data-t="Position from an external sensor" style="margin:0">
+$$z_k = x_k + n_k$$
+<p class="small">$z$ observed position, $n$ observation noise: $E[n] = 0$, $R = E[n^2]$. Initial error and all noises zero-mean and mutually uncorrelated.</p>
+</div>
+</div>
+<p>Notation: $\hat x^-_k$ is the estimate <b>before</b> the update (prediction), $\hat x^+_k$ <b>after</b> it; the estimation error is $e = x - \hat x$ and, for a zero-mean error, its variance is $P = E[e^2]$.</p>
+
+<h2>Prediction: the variance grows</h2>
+$$\hat x^-_k = \hat x^+_{k-1} + u_{k-1}, \qquad e^-_k = x_k - \hat x^-_k = e^+_{k-1} + w_{k-1}$$
+$$P^-_k = E[(e^+_{k-1})^2] + 2E[e^+_{k-1}w_{k-1}] + E[w^2_{k-1}] = P^+_{k-1} + Q$$
+<p>The cross term vanishes because the previous error and the new travel error are uncorrelated. Each prediction <b>adds</b> the travel uncertainty $Q$.</p>
+
+<h2>Correction: deriving the Kalman gain</h2>
+<p>Take a weighted average of prediction and observation (step index dropped):</p>
+$$\hat x^+ = \hat x^- + K(z - \hat x^-) = (1 - K)\hat x^- + Kz$$
+<p>Substitute $z = x + n$: $e^+ = x - \hat x^+ = (1 - K)e^- - Kn$. The two errors are uncorrelated, so</p>
+$$P^+(K) = (1 - K)^2P^- + K^2R$$
+<p>This is a parabola in $K$. Set its derivative to zero ($P^- \ge 0$, $R > 0$):</p>
+$$\frac{dP^+}{dK} = -2(1 - K)P^- + 2KR = 0 \;\Rightarrow\; K^* = \frac{P^-}{P^- + R}, \qquad \frac{d^2P^+}{dK^2} = 2(P^- + R) > 0$$
+$$P^+(K^*) = \frac{R^2P^- + (P^-)^2R}{(P^- + R)^2} = \frac{P^-R}{P^- + R} = (1 - K^*)P^-$$
+<figure class="fig"><div class="panel"><img src="fig/l4_gain.svg" alt=""></div>
+<figcaption>Left: $P^+(K)$ for $P^- = 4$, $R = 1$ — the minimum is at $K^* = 0.8$ with $P^+ = 0.8$ (slide 18). Right: the gain depends only on the ratio $P^-/R$.</figcaption></figure>
+<div class="co intuition" data-t="Two ways to read the result"><ul>
+<li><b>Weighted average:</b> $\hat x^+ = \dfrac{R\,\hat x^- + P^-z}{P^- + R}$ — each source is weighted by the <em>other's</em> variance, so the more certain one dominates.</li>
+<li><b>Information adds:</b> $\dfrac1{P^+} = \dfrac1{P^-} + \dfrac1R$, so $P^+ \le \min(P^-, R)$. Combining two independent estimates is always at least as good as the better one.</li>
+</ul></div>
+
+<h2>One full cycle, and what Q and R do</h2>
+<div class="co example" data-t="Worked example · slide 19">
+<p>Previous estimate 8 m with $P^+ = 3$ m²; wheel travel 2 m with $Q = 1$ m²; observation 12 m with $R = 1$ m².</p>
+<ol class="steps">
+<li><b>Predict:</b> $\hat x^- = 8 + 2 = 10$ m, $P^- = 3 + 1 = 4$ m².</li>
+<li><b>Gain:</b> $K = 4/(4 + 1) = 0.8$.</li>
+<li><b>Innovation:</b> $\nu = z - \hat x^- = 12 - 10 = 2$ m.</li>
+<li><b>Correct:</b> $\hat x^+ = 10 + 0.8 \times 2 = 11.6$ m, $P^+ = (1 - 0.8) \times 4 = 0.8$ m² ($\sigma = 0.89$ m).</li>
+</ol>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l4_fusion.svg" alt=""></div>
+<figcaption>The same cycle as probability densities: prediction shifts and widens, the update moves toward the observation and narrows below both.</figcaption></figure>
+<table class="tbl">
+  <tr><th>Case (prediction 10 m, observation 12 m, $P^+_{k-1} = 3$)</th><th class="c">$K$</th><th class="num">Corrected</th></tr>
+  <tr><td>baseline: $Q = 1$, $R = 1$</td><td class="c">0.800</td><td class="num">11.600 m</td></tr>
+  <tr><td>$R$ increased: $Q = 1$, $R = 9$</td><td class="c">0.308</td><td class="num">10.615 m</td></tr>
+  <tr><td>$Q$ increased: $Q = 13$, $R = 1$</td><td class="c">0.941</td><td class="num">11.882 m</td></tr>
+</table>
+<div class="co key"><p>A larger $R$ favors the prediction; a larger $Q$ favors the observation. $Q$ and $R$ are the variances <b>set in the filter</b> — tuning knobs that should match reality: too small a $Q$ makes the filter overconfident in its model and slow to react.</p></div>
+<h3>When observations pause</h3>
+<p>Set the initial $\hat x^+_0$ and $P^+_0$; each step's corrected value and variance feed the next prediction. With no observation, the correction is skipped: $\hat x^+_k = \hat x^-_k$, $P^+_k = P^-_k$, so σ grows by $Q$ every step. The first new observation pulls it back down.</p>
+<figure class="fig"><div class="panel"><img src="fig/l4_gap.svg" alt=""></div>
+<figcaption>Re-simulated with the slide's settings, $Q = 0.09$ m², $R = 1$ m², observations missing for 8–11 s.</figcaption></figure>
+<div class="co beyond" data-t="Beyond the slides · the steady state"><p>With constant $Q$ and $R$ the filter settles where predict and correct balance: $P^- = P^+ + Q$ and $P^+ = P^-R/(P^- + R)$ give $(P^-)^2 - QP^- - QR = 0$. For $Q = 0.09$, $R = 1$: $P^- = 0.348$, $P^+ = 0.258$ ($\sigma = 0.51$ m) and a constant gain $K = 0.258$ — the flat level in the lower plot.</p></div>
+
+<h2>Estimating velocity from position: the matrix filter</h2>
+<p>Now drop the wheel input and let a <b>constant-velocity model</b> predict the position from the previous velocity estimate, while only the position is observed:</p>
+$$\mathbf{x} = \begin{bmatrix} p \\ v \end{bmatrix}, \quad \mathbf{x}_k = F\mathbf{x}_{k-1} + \mathbf{w}_{k-1}, \quad F = \begin{bmatrix} 1 & \Delta t \\ 0 & 1 \end{bmatrix}, \qquad z_k = H\mathbf{x}_k + n_k, \quad H = \begin{bmatrix} 1 & 0 \end{bmatrix}$$
+<h3>The covariance matrix</h3>
+<p>With $e_p = p - \hat p$ and $e_v = v - \hat v$:</p>
+$$P = E[\mathbf{e}\mathbf{e}^\T] = \begin{bmatrix} P_{pp} & P_{pv} \\ P_{pv} & P_{vv} \end{bmatrix}$$
+<p>Diagonal entries are the variances of each error; the off-diagonal <b>cross-covariance</b> says whether the two errors grow and shrink together. Even without process noise the prediction creates it, because a velocity error integrates into position:</p>
+$$e^-_{p,k} = e^+_{p,k-1} + \Delta t\,e^+_{v,k-1} \quad\Rightarrow\quad P^-_{pv,k} = P^+_{pv,k-1} + \Delta t\,P^+_{vv,k-1}$$
+<h3>Prediction covariance and process noise</h3>
+<p>If the previous error and the new process noise are uncorrelated:</p>
+$$\mathbf{e}^-_k = F\mathbf{e}^+_{k-1} + \mathbf{w}_{k-1}, \qquad P^-_k = E[\mathbf{e}^-_k(\mathbf{e}^-_k)^\T] = FP^+_{k-1}F^\T + Q$$
+<p>Model the unknown disturbance as a constant acceleration error $a$ within the step ($E[a] = 0$, variance $\sigma_a^2$). It moves position by $a\Delta t^2/2$ and velocity by $a\Delta t$:</p>
+$$\mathbf{w} = G\,a, \quad G = \begin{bmatrix} \Delta t^2/2 \\ \Delta t \end{bmatrix}, \qquad Q = G\sigma_a^2G^\T = \sigma_a^2\begin{bmatrix} \Delta t^4/4 & \Delta t^3/2 \\ \Delta t^3/2 & \Delta t^2 \end{bmatrix}$$
+<p>The same acceleration error affects both states, so $Q$'s off-diagonal entries are not zero either.</p>
+<h3>Innovation and the gain matrix</h3>
+$$\nu = z - H\hat{\mathbf{x}}^-, \qquad S = E[\nu^2] = HP^-H^\T + R$$
+<p>With one position observation, $S$ is a positive scalar. Minimizing the corrected variance of the $i$-th state, $P^+_{ii}(K_i) = P^-_{ii} - 2K_i(P^-H^\T)_i + K_i^2S$, gives</p>
+$$K_i = \frac{(P^-H^\T)_i}{S}, \qquad K = \frac{P^-H^\T}{S} = \begin{bmatrix} P^-_{pp}/S \\ P^-_{pv}/S \end{bmatrix}$$
+<p>The position gain uses the position variance; the <b>velocity gain uses the cross-covariance</b>.</p>
+<div class="co example" data-t="Worked example · slides 25–27">
+<p>$\hat{\mathbf{x}}^+_0 = [0\ \mathrm{m}, 1\ \mathrm{m/s}]^\T$, $P^+_0 = \diag(1, 1)$, $\Delta t = 1$ s, $\sigma_a^2 = 0.1$ m²/s⁴; then $z = 1.5$ m with $R = 0.25$ m².</p>
+<ol class="steps">
+<li>$\hat{\mathbf{x}}^- = F\hat{\mathbf{x}}^+_0 = [1, 1]^\T$, $Q = \begin{bmatrix} 0.025 & 0.05 \\ 0.05 & 0.1 \end{bmatrix}$, $P^- = \begin{bmatrix} 2 & 1 \\ 1 & 1 \end{bmatrix} + Q = \begin{bmatrix} 2.025 & 1.05 \\ 1.05 & 1.1 \end{bmatrix}$.</li>
+<li>$\nu = 1.5 - 1 = 0.5$ m, $S = 2.025 + 0.25 = 2.275$ m².</li>
+<li>$K_p = 2.025/2.275 \approx 0.8901$, $K_v = 1.05/2.275 \approx 0.4615$ s⁻¹.</li>
+<li>Corrections $+0.445$ m and $+0.231$ m/s: $\hat{\mathbf{x}}^+ \approx [1.445\ \mathrm{m},\ 1.231\ \mathrm{m/s}]^\T$.</li>
+<li>$P^+ = P^- - KHP^- \approx \begin{bmatrix} 0.223 & 0.115 \\ 0.115 & 0.615 \end{bmatrix}$.</li>
+</ol>
+</div>
+<div class="side wide-l">
+<div class="co intuition" style="margin:0"><p>The robot is further ahead than predicted, and because position and velocity errors are positively correlated, it probably also moved faster than assumed — so the velocity is raised too. If $P_{pv} = 0$, a position observation gives <b>no</b> velocity correction. The filter learns velocity only through the correlation the motion model builds up.</p></div>
+<figure class="fig"><div class="panel"><img src="fig/l4_ellipse.svg" alt=""></div>
+<figcaption>Covariance ellipses of the example: tilted by the cross-covariance, shrunk mostly along position by the update.</figcaption></figure>
+</div>
+
+<h2>Bias: confident but wrong</h2>
+<p>Suppose every observation reads 12 m while the robot sits at 10 m: $z = x + b + n$ with a constant <b>bias</b> $b = 2$ m that the filter does not model (here $n = 0$, $P_0 = 4$ m², $Q = 0$, $R = 0.04$ m²).</p>
+<table class="tbl compact">
+  <tr><th>After</th><th class="num">Estimate</th><th class="num">Filter σ</th><th class="num">Actual error</th></tr>
+  <tr><td>1 observation</td><td class="num">11.980 m</td><td class="num">0.199 m</td><td class="num">1.98 m</td></tr>
+  <tr><td>40 observations</td><td class="num">12.000 m</td><td class="num">0.032 m</td><td class="num">2.00 m</td></tr>
+</table>
+<div class="figrow">
+<figure class="fig"><div class="panel"><img src="fig/l4_bias.svg" alt=""></div>
+<figcaption>The filter's ±σ band shrinks around the wrong value.</figcaption></figure>
+<figure class="fig"><div class="panel"><img src="fig/l4_ident.svg" alt=""></div>
+<figcaption>Adding $b$ to the state does not help by itself: A and B explain $z = 12$ equally well.</figcaption></figure>
+</div>
+<p>The variance can shrink while the bias remains: $P$ measures only the uncertainty <em>the model knows about</em>. Even with the bias in the state, observing only $z = p + b$ cannot separate the two values — every point of the line $p + b = 12$ fits. Repeating the same kind of observation never helps; an <b>independent</b> observation (e.g. another sensor reporting $p = 10$ m) identifies state A.</p>
+<div class="co tip"><p>Expect a "why did the filter go wrong although σ was small?" question. Answer pattern: the error source was not in the model (bias, slip, wrong $Q/R$, wrong frame or time), so the covariance cannot reflect it; fix the model or add an independent measurement that makes the error observable.</p></div>
+
+<h2>Formula sheet</h2>
+<div class="fsheet">
+  <div class="f"><div class="n">Encoder</div><div class="eq">$\Delta\phi = 2\pi\Delta c/N,\ \ \Delta s = r\Delta\phi$</div></div>
+  <div class="f"><div class="n">Differential drive</div><div class="eq">$\Delta s = \frac{\Delta s_R + \Delta s_L}{2},\ \ \Delta\theta = \frac{\Delta s_R - \Delta s_L}{b}$</div></div>
+  <div class="f"><div class="n">Pose update (mid heading)</div><div class="eq">$\alpha = \theta_k + \tfrac{\Delta\theta}{2},\ \Delta x = \Delta s\cos\alpha,\ \Delta y = \Delta s\sin\alpha$</div></div>
+  <div class="f"><div class="n">Planar quaternion</div><div class="eq">$q = (0, 0, \sin\tfrac\theta2, \cos\tfrac\theta2),\ \ \theta = 2\operatorname{atan2}(q_z, q_w)$</div></div>
+  <div class="f"><div class="n">1-D predict</div><div class="eq">$\hat x^- = \hat x^+ + u,\ \ P^- = P^+ + Q$</div></div>
+  <div class="f"><div class="n">1-D correct</div><div class="eq">$K = \frac{P^-}{P^- + R},\ \hat x^+ = \hat x^- + K(z - \hat x^-),\ P^+ = (1 - K)P^-$</div></div>
+  <div class="f"><div class="n">Variance after any gain</div><div class="eq">$P^+(K) = (1 - K)^2P^- + K^2R$</div></div>
+  <div class="f"><div class="n">Information form</div><div class="eq">$1/P^+ = 1/P^- + 1/R$</div></div>
+  <div class="f"><div class="n">Matrix predict</div><div class="eq">$\hat{\mathbf{x}}^- = F\hat{\mathbf{x}}^+,\ \ P^- = FP^+F^\T + Q$</div></div>
+  <div class="f"><div class="n">Constant-acceleration noise</div><div class="eq">$Q = \sigma_a^2\begin{bmatrix} \Delta t^4/4 & \Delta t^3/2 \\ \Delta t^3/2 & \Delta t^2 \end{bmatrix}$</div></div>
+  <div class="f"><div class="n">Innovation · gain</div><div class="eq">$\nu = z - H\hat{\mathbf{x}}^-,\ S = HP^-H^\T + R,\ K = P^-H^\T S^{-1}$</div></div>
+  <div class="f"><div class="n">Matrix correct</div><div class="eq">$\hat{\mathbf{x}}^+ = \hat{\mathbf{x}}^- + K\nu,\ \ P^+ = P^- - KHP^-$</div></div>
+</div>
+
+<h2>Practice questions</h2>
+<div class="qa" data-type="concept" data-level="1">
+<div class="q"><p>Why does a ROS robot keep both an odom frame and a map frame? Which one would you use for a local obstacle-avoidance controller, and which for navigating to a building room?</p></div>
+<div class="a"><p>odom is <b>continuous and smooth</b> (it integrates wheel motion without jumps) but drifts without bound; map is <b>globally accurate</b> (corrected by localization) but the robot's pose in it can jump when a correction arrives. A local controller wants smooth relative motion over a few seconds → odom. Reaching a room requires global accuracy → map. Keeping both, linked by map → odom, gives each consumer what it needs.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="1">
+<div class="q"><p>A wheel of radius 0.08 m has an encoder giving 4096 counts per wheel revolution (after the gearbox and quadrature). How far does the wheel roll for 1024 counts?</p></div>
+<div class="a"><p>$\Delta\phi = 2\pi \times 1024/4096 = \pi/2$ rad, $\Delta s = 0.08 \times \pi/2 \approx 0.1257$ m.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>Same robot as slide 9 ($r = 0.05$ m, $b = 0.30$ m, $N = 1000$, start at $(0, 0, 0)$). The left wheel turns +300 counts, the right +100. Compute the new pose with the mid-heading rule.</p></div>
+<div class="a"><p>$\Delta s_L = 94.248$ mm, $\Delta s_R = 31.416$ mm. $\Delta s = 62.832$ mm, $\Delta\theta = (31.416 - 94.248)/300 = -0.20944$ rad $= -12^\circ$ (a right turn, since the left wheel went further). $\alpha = -6^\circ$: $\Delta x = 62.832\cos6^\circ \approx 62.488$ mm, $\Delta y = -62.832\sin6^\circ \approx -6.568$ mm. Pose ≈ $(0.06249\ \mathrm{m}, -0.00657\ \mathrm{m}, -12^\circ)$.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="1">
+<div class="q"><p>Write the ROS quaternion for planar headings of 120° and −90°. Which heading does $q = (0, 0, 0.2588, 0.9659)$ represent?</p></div>
+<div class="a"><p>120°: $(0, 0, \sin60^\circ, \cos60^\circ) = (0, 0, 0.8660, 0.5)$. −90°: $(0, 0, \sin(-45^\circ), \cos(-45^\circ)) = (0, 0, -0.7071, 0.7071)$. For $(0, 0, 0.2588, 0.9659)$: $\theta = 2\operatorname{atan2}(0.2588, 0.9659) = 2 \times 15^\circ = 30^\circ$.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>In a <code>nav_msgs/Odometry</code> message, in which frame is the pose expressed and in which the twist? Why is it sensible to express the twist that way for a wheeled robot?</p></div>
+<div class="a"><p>The pose is the pose of <code>child_frame_id</code> (base_link) expressed in <code>header.frame_id</code> (odom). The twist is expressed in the child frame, base_link. For a wheeled robot the natural velocities are body-fixed — forward speed and yaw rate (a differential drive cannot move sideways, so the lateral body velocity is ~0); in odom the same motion would mix into $\dot x$ and $\dot y$ depending on the heading.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>For each case of slide 14 say what the odometry error is and how an extra sensor could reveal it: (a) wheel spinning on ice; (b) robot pushed sideways by a person while the wheels are stopped.</p></div>
+<div class="a"><p>(a) The encoder counts rotation, so odometry reports 50 mm of travel while the robot stays put — a 50 mm error that grows as long as it spins. An IMU (no acceleration), visual odometry or LiDAR scan matching would show no motion, and motor current/command-vs-motion checks can flag it. (b) The wheels do not turn, so odometry reports no motion while the robot moved — undetectable by the encoders; an IMU would sense the push, and any absolute observation (GNSS, landmarks, scan matching) would show the displacement. In both cases the fix is an independent position observation fused by a filter.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="derive" data-level="2">
+<div class="q"><p>Derive the optimal gain for $\hat x^+ = \hat x^- + K(z - \hat x^-)$ with $z = x + n$, and show that $P^+ \le \min(P^-, R)$.</p></div>
+<div class="a"><p>$e^+ = x - \hat x^+ = (1 - K)e^- - Kn$. With $e^-$ and $n$ uncorrelated and zero-mean, $P^+ = (1 - K)^2P^- + K^2R$. $dP^+/dK = -2(1 - K)P^- + 2KR = 0 \Rightarrow K^* = P^-/(P^- + R)$; the second derivative $2(P^- + R) > 0$ confirms a minimum. Substituting, $P^+ = P^-R/(P^- + R)$. Since $R/(P^- + R) \le 1$, $P^+ \le P^-$; since $P^-/(P^- + R) \le 1$, $P^+ \le R$. Equivalently $1/P^+ = 1/P^- + 1/R$.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>One cycle: $\hat x^+_{k-1} = 5$ m, $P^+_{k-1} = 2$ m², wheel travel $u = 1$ m with $Q = 0.5$ m², observation $z = 6.5$ m with $R = 0.5$ m². Compute $\hat x^-$, $P^-$, $K$, $\hat x^+$, $P^+$.</p></div>
+<div class="a"><p>$\hat x^- = 6$ m, $P^- = 2.5$ m²; $K = 2.5/3 \approx 0.833$; $\nu = 0.5$ m; $\hat x^+ = 6 + 0.833 \times 0.5 \approx 6.417$ m; $P^+ = (1 - 0.833) \times 2.5 \approx 0.417$ m² (σ ≈ 0.65 m), below both 2.5 and 0.5. ✓</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>Describe what the 1-D filter does in these limits: (a) $R \to 0$; (b) $R \to \infty$; (c) $P^- \to 0$; (d) $Q = 0$ and many observations.</p></div>
+<div class="a"><p>(a) $K \to 1$: the estimate jumps to the observation and $P^+ \to 0$ (perfect sensor). (b) $K \to 0$: observations are ignored; the filter becomes pure dead reckoning with $P$ growing by $Q$ each step. (c) $K \to 0$: the prediction is already certain, so nothing changes. (d) $P$ keeps shrinking roughly like $R/n$ and $K \to 0$: the filter becomes ever more confident and ever slower to react — dangerous if the model is slightly wrong (a reason never to set $Q$ exactly to zero).</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="3">
+<div class="q"><p>With $Q = 0.09$ m² and $R = 1$ m² every step, find the steady-state $P^-$, $P^+$, σ and gain. Compare with the lower plot of slide 21.</p></div>
+<div class="a"><p>At steady state $P^- = P^+ + Q$ and $P^+ = P^-R/(P^- + R)$. Substituting gives $(P^-)^2 - QP^- - QR = 0$, so $P^- = \tfrac12(Q + \sqrt{Q^2 + 4QR}) = \tfrac12(0.09 + 0.6067) = 0.348$ m². Then $P^+ = 0.348/1.348 = 0.258$ m², σ ≈ 0.51 m, and $K = P^-/(P^- + R) \approx 0.258$. The slide's σ curve sits at about 0.5 m outside the gap — consistent.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>For the constant-velocity model with $\Delta t = 0.5$ s and $\sigma_a^2 = 0.2$ m²/s⁴, compute $F$ and $Q$. Why are $Q$'s off-diagonal terms positive?</p></div>
+<div class="a">
+$$F = \begin{bmatrix} 1 & 0.5 \\ 0 & 1 \end{bmatrix}, \qquad Q = 0.2\begin{bmatrix} 0.015625 & 0.0625 \\ 0.0625 & 0.25 \end{bmatrix} = \begin{bmatrix} 0.003125 & 0.0125 \\ 0.0125 & 0.05 \end{bmatrix}$$
+<p>One random acceleration $a$ causes both $\Delta p = a\Delta t^2/2$ and $\Delta v = a\Delta t$ with the same sign, so the two process-noise components are perfectly positively correlated.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>In the position–velocity example the velocity was corrected from 1 to 1.231 m/s although only position was measured. Explain the mechanism. What would happen if the initial covariance were $\diag(1, 1)$ and the update happened <em>before</em> any prediction?</p></div>
+<div class="a"><p>The velocity gain is $K_v = P^-_{pv}/S$. The prediction $p_k = p_{k-1} + \Delta t\,v_{k-1}$ makes position errors depend on velocity errors, creating $P^-_{pv} = 1.05 > 0$; a position innovation therefore implies a velocity error of the same sign. If the update came first with $P = \diag(1, 1)$, then $P_{pv} = 0$, so $K_v = 0$: the position would be corrected but the velocity would not change at all.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="3">
+<div class="q"><p>A GNSS receiver has an unknown constant offset of 2 m. After a minute, the Kalman filter reports σ = 3 cm but the robot is 2 m off. Why is σ so small? Would adding the bias to the state fix it? What would?</p></div>
+<div class="a"><p>$P$ only describes errors the model contains (zero-mean, uncorrelated noise); every consistent observation shrinks it, so σ → small while the unmodeled bias passes straight into the estimate. Adding $b$ to the state alone does not help: with only $z = p + b$ the pair is unobservable (a line of solutions). It helps if another, independent measurement constrains $p$ or $b$ — e.g. wheel odometry over a known start, a surveyed landmark, a second GNSS antenna/base station — or if the bias is calibrated beforehand.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="1">
+<div class="q"><p>During an 8–11 s observation gap (slide 21), what happens to the estimate and to σ? Which parameter controls how fast σ grows?</p></div>
+<div class="a"><p>The filter runs prediction only: $\hat x^+ = \hat x^-$ follows the motion model (dead reckoning), and $P$ increases by $Q$ every step, so σ grows (like $\sqrt{P_0 + nQ}$). $Q$ controls the growth. At the first new observation $K$ is larger than usual (because $P^-$ is larger), so the estimate moves strongly toward it and σ drops back.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>After the square drive of slide 3, a localization system publishes the map → odom correction (−20°, (−0.26, 0.41) m). A teammate says the robot's whole logged trajectory is now correct. Is it?</p></div>
+<div class="a"><p>No. The correction is a single rigid transform applied to all odom points; it makes the <em>current</em> pose (and the last segment) right, but the shape distortion of the earlier path — caused by errors that accumulated at different times — remains (slide 4: "aligning the current pose does not remove the error in the past path"). Correcting each past pose differently requires smoothing or pose-graph optimization over the whole trajectory with loop closures (chapter 6).</p></div>
+</div><!--/qa-->
+</section>

@@ -1,0 +1,149 @@
+<section class="chapter syn" id="ch-syn">
+<header class="ch-head">
+  <div class="ch-bignum">S</div>
+  <div class="ch-kicker">All lectures</div>
+  <h1>Putting it together</h1>
+  <p class="ch-sub">The one pattern behind every lecture, the mistakes that cost marks across all of them, a last-day formula sheet, and mixed questions that combine lectures.</p>
+</header>
+
+<h2>One pattern behind the whole course</h2>
+<p>Almost every computation in Lectures 2–7 has the same anatomy: a <b>model</b> predicts what a <b>calibrated sensor</b> should see, the difference is a <b>residual</b>, residuals are <b>weighted by their uncertainty</b>, and an estimate is found by making the weighted residuals small — either <b>recursively</b>, one measurement at a time, or in a <b>batch</b> over a whole data set.</p>
+<figure class="fig"><div class="panel">
+<svg class="dia" viewBox="0 0 660 250" width="660" height="250">
+  <defs><marker id="a11" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#8a94a7"/></marker></defs>
+  <rect x="8" y="12" width="190" height="72" rx="10" class="f-surface2" stroke="#22d3ee"/>
+  <text x="20" y="34" class="ttl" style="fill:#22d3ee">Model · ch. 2</text>
+  <text x="20" y="54" class="lbl">motion f(x, u; θ), kinematics,</text>
+  <text x="20" y="70" class="lbl">frames, integration</text>
+  <rect x="8" y="104" width="190" height="72" rx="10" class="f-surface2" stroke="#a78bfa"/>
+  <text x="20" y="126" class="ttl" style="fill:#a78bfa">Calibrated sensors · ch. 3</text>
+  <text x="20" y="146" class="lbl">projection h(x), extrinsics,</text>
+  <text x="20" y="162" class="lbl">time offsets → measurements z</text>
+  <rect x="236" y="56" width="176" height="76" rx="10" class="f-surface2" stroke="#fb923c"/>
+  <text x="248" y="80" class="ttl" style="fill:#fb923c">Residual &amp; weight</text>
+  <text x="248" y="100" class="m" style="font-size:13px">r = z − h(x)</text>
+  <text x="248" y="120" class="lbl">weighted by Σ⁻¹ (R, Q, 1/σ²)</text>
+  <rect x="452" y="12" width="200" height="72" rx="10" class="f-surface2" stroke="#fbbf24"/>
+  <text x="464" y="34" class="ttl" style="fill:#fbbf24">Recursive · ch. 4, 6</text>
+  <text x="464" y="54" class="lbl">KF / EKF / UKF: one step at a</text>
+  <text x="464" y="70" class="lbl">time, keeps x̂ and P</text>
+  <rect x="452" y="104" width="200" height="72" rx="10" class="f-surface2" stroke="#fb7185"/>
+  <text x="464" y="126" class="ttl" style="fill:#fb7185">Batch · ch. 3, 6</text>
+  <text x="464" y="146" class="lbl">calibration, pose graphs:</text>
+  <text x="464" y="162" class="lbl">all data at once, Gauss–Newton/LM</text>
+  <line x1="199" y1="52" x2="234" y2="80" stroke="#8a94a7" stroke-width="1.5" marker-end="url(#a11)"/>
+  <line x1="199" y1="138" x2="234" y2="110" stroke="#8a94a7" stroke-width="1.5" marker-end="url(#a11)"/>
+  <line x1="413" y1="80" x2="450" y2="52" stroke="#8a94a7" stroke-width="1.5" marker-end="url(#a11)"/>
+  <line x1="413" y1="110" x2="450" y2="138" stroke="#8a94a7" stroke-width="1.5" marker-end="url(#a11)"/>
+  <rect x="8" y="196" width="644" height="42" rx="10" fill="#13261d" stroke="#4ade80"/>
+  <text x="22" y="216" style="fill:#4ade80;font-size:12px;font-weight:600">Optimization toolbox · ch. 7</text>
+  <text x="22" y="231" class="lbl">directions (gradient, Newton, Gauss–Newton, LM), step control (Armijo, gain ratio), constraints (KKT, QP, SQP)</text>
+</svg></div>
+<figcaption>The common skeleton. Lecture 1's stack (perception → estimation → planning → control) runs on top of it.</figcaption></figure>
+<table class="tbl compact">
+  <tr><th style="width:17%">Where</th><th style="width:20%">Unknowns</th><th>Prediction</th><th style="width:17%">Measurement</th><th style="width:16%">Weighting</th><th style="width:14%">Solver</th></tr>
+  <tr><td>Intrinsics (3)</td><td>$K$, $\mathbf{d}$, pattern poses</td><td>$\pi_{K,\mathbf{d}}(R_i\mathbf{P}_j + \mathbf{t}_i)$</td><td>corner pixels</td><td>pixel noise</td><td>linear init + LM</td></tr>
+  <tr><td>Camera–LiDAR (3)</td><td>$R_{LC}$, $\mathbf{t}_{LC}$</td><td>$R\mathbf{n}_C$, $\mathbf{n}_L^\T(R\mathbf{p}_C + \mathbf{t})$</td><td>LiDAR planes</td><td>(equal)</td><td>SVD + linear LS</td></tr>
+  <tr><td>Camera–IMU (3)</td><td>$T_{BC}$, $\Delta t$, spline, biases</td><td>gyro, accel, projection</td><td>IMU, images</td><td>$\Sigma_s$ + robust ρ</td><td>nonlinear LS</td></tr>
+  <tr><td>Kalman filter (4)</td><td>$\mathbf{x}_k$</td><td>$F\hat{\mathbf{x}}$, $H\mathbf{x}$</td><td>position $z$</td><td>$Q$, $R$ → $P$, $S$</td><td>closed form $K$</td></tr>
+  <tr><td>EKF / UKF (6)</td><td>pose $\mathbf{x}_k$</td><td>$f(\mathbf{x}, \mathbf{u})$, $h(\mathbf{x})$</td><td>range, bearing</td><td>$Q$, $R$</td><td>Jacobians / sigma pts</td></tr>
+  <tr><td>Pose graph (6)</td><td>poses $X$</td><td>$h_{ab}(\mathbf{x}_a, \mathbf{x}_b)$</td><td>relative poses</td><td>$D = \diag(1/\sigma)$</td><td>Gauss–Newton</td></tr>
+</table>
+<div class="co beyond" data-t="Beyond the slides · the Kalman update is a weighted least-squares problem">
+<p>Combine the prediction (a "measurement" of $\mathbf{x}$ with covariance $P^-$) and the new observation into one cost:</p>
+$$J(\mathbf{x}) = \tfrac12(\mathbf{x} - \hat{\mathbf{x}}^-)^\T(P^-)^{-1}(\mathbf{x} - \hat{\mathbf{x}}^-) + \tfrac12(\mathbf{z} - H\mathbf{x})^\T R^{-1}(\mathbf{z} - H\mathbf{x})$$
+<p>Setting $\nabla J = 0$ gives $\left((P^-)^{-1} + H^\T R^{-1}H\right)\hat{\mathbf{x}}^+ = (P^-)^{-1}\hat{\mathbf{x}}^- + H^\T R^{-1}\mathbf{z}$, i.e.</p>
+$$P^+ = \left((P^-)^{-1} + H^\T R^{-1}H\right)^{-1}, \qquad \hat{\mathbf{x}}^+ = \hat{\mathbf{x}}^- + P^+H^\T R^{-1}(\mathbf{z} - H\hat{\mathbf{x}}^-)$$
+<p>which equals $K = P^-H^\T S^{-1}$ (matrix inversion lemma). In 1-D this is exactly $1/P^+ = 1/P^- + 1/R$ from chapter 4. With a nonlinear $h$, one Gauss–Newton step on $J$ from $\hat{\mathbf{x}}^-$ <em>is</em> the EKF update; iterating it gives the iterated EKF. So the filter of chapters 4 and 6 and the optimizers of chapters 3, 6 and 7 are two ways of solving the same kind of problem.</p>
+</div>
+
+<h2>Mistakes that cost marks — in every lecture</h2>
+<table class="tbl">
+  <tr><th style="width:18%">Theme</th><th>Checklist</th></tr>
+  <tr><td><b>Frames</b></td><td>$T_{AB}$ maps B coordinates into A; chains need matching inner indices; the inverse translation is $-R^\T\mathbf{t}$; velocities and displacements are only rotated; $\mathbf{t}_{GB}$ is expressed in G.</td></tr>
+  <tr><td><b>Angles</b></td><td>radians in code; wrap every angle difference into $[-\pi, \pi)$; quaternions use the <em>half</em> angle and ROS order $(x, y, z, w)$; $\tan\delta \ne \delta$; atan2, not atan.</td></tr>
+  <tr><td><b>Units</b></td><td>mm vs m (a 1000× error); pixels vs normalized coordinates; variance (m²) vs standard deviation (m) — $Q$, $R$, $P$ are variances; pattern size in the real unit.</td></tr>
+  <tr><td><b>Time</b></td><td>use joint angles / poses at the measurement time; temporal offsets and rolling shutter only show while moving; skip the update (not the prediction) when an observation is missing.</td></tr>
+  <tr><td><b>Uncertainty</b></td><td>$P$ only covers modeled errors (bias!); stereo depth error grows with $Z^2$; information adds ($1/P^+ = 1/P^- + 1/R$); a confident filter can still be wrong.</td></tr>
+  <tr><td><b>Validation</b></td><td>residual ≠ accuracy ≠ repeatability; evaluate on data not used for fitting, with calibration parameters fixed; a small step is not convergence — check KKT/gradient.</td></tr>
+</table>
+<div class="co tip" data-t="Sanity checks you can do in 10 seconds"><ul>
+<li>$R^\T R = I$ and $\det R = +1$; $|q| = 1$; the last row of a homogeneous transform is $[0\ \cdots\ 0\ 1]$.</li>
+<li>In 1-D: $0 \le K \le 1$ and $P^+ \le \min(P^-, R)$; the corrected value lies between prediction and observation.</li>
+<li>Projected points need $Z_C > 0$; rectified disparity should be positive; $Z = fB/d$ shrinks as $d$ grows.</li>
+<li>Euler is stable for $0 < h < 2\tau$ on a first-order lag; halving $h$ should cut the error by $2^p$.</li>
+<li>Gauss–Newton/LM: the cost should decrease after an accepted step; a descent direction has $\nabla f^\T\mathbf{d} < 0$.</li>
+</ul></div>
+
+<h2>Last-day formula sheet</h2>
+<div class="fsheet">
+  <div class="f"><div class="n">Transform · inverse (ch. 2)</div><div class="eq">$\mathbf{p}_A = R_{AB}\mathbf{p}_B + \mathbf{t}_{AB},\ \ T_{AB}^{-1} = \begin{bmatrix} R^\T & -R^\T\mathbf{t} \\ \mathbf{0} & 1 \end{bmatrix}$</div></div>
+  <div class="f"><div class="n">2-link arm (ch. 2)</div><div class="eq">$\mathbf{p} = (L_1c_1 + L_2c_{12},\ L_1s_1 + L_2s_{12})$</div></div>
+  <div class="f"><div class="n">Bicycle model (ch. 2)</div><div class="eq">$\dot\psi = \frac{v}{L}\tan\delta,\ \kappa = \frac{\tan\delta}{L},\ \beta = \arctan(\tfrac{l_r}{L}\tan\delta)$</div></div>
+  <div class="f"><div class="n">Integration (ch. 2)</div><div class="eq">Euler $p = 1$, midpoint $p = 2$, RK4 $p = 4$; $\ |1 - h/\tau| < 1$</div></div>
+  <div class="f"><div class="n">Pinhole (ch. 3)</div><div class="eq">$u = f_xX/Z + c_x,\ \ v = f_yY/Z + c_y$</div></div>
+  <div class="f"><div class="n">Distortion (ch. 3)</div><div class="eq">$x_d = x(1 + k_1r^2 + k_2r^4 + k_3r^6) + \text{tangential}$</div></div>
+  <div class="f"><div class="n">Epipolar (ch. 3)</div><div class="eq">$\tilde{\mathbf{m}}_2^\T F\tilde{\mathbf{m}}_1 = 0,\ E = [\mathbf{t}]_\times R,\ F = K_2^{-\T}EK_1^{-1}$</div></div>
+  <div class="f"><div class="n">Stereo depth (ch. 3)</div><div class="eq">$Z = fB/d,\ \ \sigma_Z \simeq Z^2\sigma_d/(fB)$</div></div>
+  <div class="f"><div class="n">Differential drive (ch. 4)</div><div class="eq">$\Delta s = \frac{s_R + s_L}{2},\ \Delta\theta = \frac{s_R - s_L}{b},\ \alpha = \theta + \frac{\Delta\theta}{2}$</div></div>
+  <div class="f"><div class="n">Planar quaternion (ch. 4)</div><div class="eq">$q = (0, 0, \sin\frac\theta2, \cos\frac\theta2)$</div></div>
+  <div class="f"><div class="n">Kalman predict (ch. 4, 6)</div><div class="eq">$\hat{\mathbf{x}}^- = F\hat{\mathbf{x}}^+ \ (f),\ \ P^- = FP^+F^\T + Q$</div></div>
+  <div class="f"><div class="n">Kalman correct (ch. 4, 6)</div><div class="eq">$S = HP^-H^\T + R,\ K = P^-H^\T S^{-1},\ P^+ = (I - KH)P^-$</div></div>
+  <div class="f"><div class="n">Range–bearing (ch. 6)</div><div class="eq">$H = \begin{bmatrix} -d_x/\rho & -d_y/\rho & 0 \\ d_y/q & -d_x/q & -1 \end{bmatrix}$</div></div>
+  <div class="f"><div class="n">UKF (ch. 6)</div><div class="eq">$\hat z = \sum W_ih(\chi_i),\ S = \sum W_id_i^2 + R,\ K = C_{xz}S^{-1}$</div></div>
+  <div class="f"><div class="n">Pose graph (ch. 6)</div><div class="eq">$h_{ab} = [C(\theta_a)^\T(\mathbf{p}_b - \mathbf{p}_a);\ \theta_b - \theta_a],\ \Phi = \tfrac12\sum\|D\mathbf{r}\|^2$</div></div>
+  <div class="f"><div class="n">Directions (ch. 7)</div><div class="eq">$B\mathbf{d} = -\nabla f$: $B = I,\ H,\ J^\T J,\ J^\T J + \eta I$</div></div>
+  <div class="f"><div class="n">Armijo · gain ratio (ch. 7)</div><div class="eq">$f(\mathbf{x} + \alpha\mathbf{d}) \le f + c_1\alpha\nabla f^\T\mathbf{d};\ \ \gamma = a/p$</div></div>
+  <div class="f"><div class="n">KKT (ch. 7)</div><div class="eq">$\nabla f + J_h^\T\boldsymbol\lambda + J_g^\T\boldsymbol\mu = 0,\ \boldsymbol\mu \ge 0,\ \mu_ig_i = 0$</div></div>
+</div>
+
+<h2>Mixed exam-style questions</h2>
+<p class="qblock-intro">These combine two or more lectures, the way longer exam problems often do.</p>
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>A camera is mounted on the tool of the 2-link arm of Lecture 2 and detects a marker at pixel $(u, v)$ with known depth $Z_C$. Write the chain that gives the marker's World coordinates, and name the lecture/calibration that provides each factor.</p></div>
+<div class="a"><p>Back-project with the intrinsics: $\mathbf{p}_C = Z_C\,K^{-1}[u, v, 1]^\T$ (after undistorting $(u, v)$) — <b>camera intrinsics, Lecture 3</b>. Then</p>
+$$\tilde{\mathbf{p}}_G = T_{GB}\,T_{BE}(\mathbf{q}(t))\,T_{EC}\,\tilde{\mathbf{p}}_C$$
+<p>$T_{GB}$: where the robot base is in the world (setup / localization); $T_{BE}(\mathbf{q})$: forward kinematics with link lengths (<b>Lecture 2</b>); $T_{EC}$: the camera's mounting pose on the tool (<b>extrinsic calibration</b>, hand–eye, Lecture 3); $\mathbf{q}(t)$ must be the joint angles at the <b>image timestamp</b> (temporal calibration, Lecture 3; timestamp error example, Lecture 2).</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="3">
+<div class="q"><p>Use the kinematic bicycle model (Lecture 2) as the EKF motion model (Lecture 6): with Euler step $h$, write $f$ and the Jacobian $F$ for $\mathbf{x} = [X, Y, \psi, v]^\T$, $\mathbf{u} = [\delta, a]^\T$. Evaluate $F$ at $\mathbf{x} = (0, 0, 0, 5)$, $\delta = 10^\circ$, $L = 2.5$ m, $h = 0.1$ s.</p></div>
+<div class="a">
+$$f = \begin{bmatrix} X + hv\cos\psi \\ Y + hv\sin\psi \\ \psi + h\frac{v}{L}\tan\delta \\ v + ha \end{bmatrix}, \qquad F = \begin{bmatrix} 1 & 0 & -hv\sin\psi & h\cos\psi \\ 0 & 1 & hv\cos\psi & h\sin\psi \\ 0 & 0 & 1 & \frac{h}{L}\tan\delta \\ 0 & 0 & 0 & 1 \end{bmatrix} = \begin{bmatrix} 1 & 0 & 0 & 0.1 \\ 0 & 1 & 0.5 & 0 \\ 0 & 0 & 1 & 0.00705 \\ 0 & 0 & 0 & 1 \end{bmatrix}$$
+<p>Speed errors grow position error along the heading and heading error (through $\tan\delta/L$); heading errors grow lateral position error (0.5 m per rad per step here). A Jacobian with respect to $\mathbf{u}$ would be needed if input noise is mapped into $Q$.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>A stereo camera ($f = 800$ px, $B = 0.12$ m, $\sigma_d = 0.5$ px) measures the distance to an obstacle and feeds it to a 1-D Kalman filter with prior variance $P^- = 0.04$ m². Compute $R$ and the gain for an obstacle at 2 m and at 8 m. What does this mean for filter design?</p></div>
+<div class="a"><p>$\sigma_Z = Z^2\sigma_d/(fB)$: 2 m → 0.0208 m, $R = 4.3 \times 10^{-4}$ m², $K = 0.04/(0.04 + 0.00043) \approx 0.99$. 8 m → 0.333 m, $R = 0.111$ m², $K = 0.04/0.151 \approx 0.26$. The measurement noise is <b>distance-dependent</b>, so $R$ must be recomputed for every measurement (from Lecture 3's error propagation); a constant $R$ would trust far measurements far too much (or near ones too little).</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>Explain with the language of Lecture 7 why a camera–IMU time offset $\Delta t$ and a position offset $b$ cannot be separated from constant-velocity data (Lecture 3, $y = v(\tau + \Delta t) + b$).</p></div>
+<div class="a"><p>Treat $(\Delta t, b)$ as unknowns of a least-squares problem with residuals $r_i = y_i - v(\tau_i)(\tau_i + \Delta t) - b$. The Jacobian columns are $\partial r_i/\partial\Delta t = -v(\tau_i)$ and $\partial r_i/\partial b = -1$. With constant $v$ the first column is $v$ times the second, so $J$ loses rank, $J^\T J$ is singular and the Gauss–Newton system has no unique solution (a valley of equal cost along $v\Delta t + b = $ const). Varying the velocity makes the columns independent — the algebraic meaning of "exciting motion".</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>Compare how the EKF (Lecture 6) and the pose graph (Lecture 6, solved with Lecture 7's Gauss–Newton) handle a loop closure detected when the robot returns to its start.</p></div>
+<div class="a"><p>An EKF keeps only the <b>current</b> pose (and its covariance): the loop-closure observation corrects the current pose, but the past poses — and the map points computed from them — stay as they were (the map → odom situation of Lecture 4). The pose graph keeps <b>all</b> poses as unknowns and minimizes all weighted residuals together; the loop closure's residual is spread over every odometry edge, correcting the entire trajectory, after which the map is rebuilt from the stored readings. The price is solving a (sparse) nonlinear least-squares problem instead of a constant-size update.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="3">
+<div class="q"><p>In Zhang's refinement the rotations $R_i$ must stay rotation matrices. Describe two ways to handle this with the methods of Lecture 7.</p></div>
+<div class="a"><p>(1) <b>Constrained optimization</b>: keep the 9 entries as variables with equality constraints $h(R) = R^\T R - I = 0$ (and $\det R = 1$) — a nonlinear constrained problem for SQP with a merit function. (2) <b>Unconstrained parametrization</b> (what practical calibrators do): describe each rotation by 3 parameters (e.g. a rotation vector, or a quaternion that is renormalized), so every parameter value is a valid rotation; then Gauss–Newton/LM apply directly. Lecture 3's linear initialization also projects its estimate onto SO(3) for the same reason.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>An EKF predicts a steering actuator with time constant $\tau = 0.05$ s using Euler steps of the filter period $h = 0.1$ s (Lecture 2 meets Lecture 6). What goes wrong and how can it be fixed?</p></div>
+<div class="a"><p>Euler on a first-order lag is stable only for $h < 2\tau = 0.1$ s; at $h = 0.1$ s the amplification factor is $1 - h/\tau = -1$, so the predicted steering angle oscillates without decaying, corrupting the predicted yaw rate and position. Fixes: sub-step the prediction (several small Euler or RK4 steps per filter period), use the exact discrete solution $e_{k+1} = e^{-h/\tau}e_k$, use implicit Euler, or — if the actuator is much faster than the filter rate — model the steering as reaching the command instantly.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="derive" data-level="3">
+<div class="q"><p>Show that the 1-D Kalman update is the minimizer of $J(x) = \frac{(x - \hat x^-)^2}{2P^-} + \frac{(z - x)^2}{2R}$ and that $1/P^+ = 1/P^- + 1/R$.</p></div>
+<div class="a"><p>Set the derivative to zero:</p>
+$$J'(x) = \frac{x - \hat x^-}{P^-} - \frac{z - x}{R} = 0 \;\Rightarrow\; x\left(\frac{1}{P^-} + \frac{1}{R}\right) = \frac{\hat x^-}{P^-} + \frac{z}{R}$$
+$$\hat x^+ = \frac{R\,\hat x^- + P^-z}{P^- + R} = \hat x^- + \frac{P^-}{P^- + R}\,(z - \hat x^-)$$
+<p>— the Kalman update with $K = P^-/(P^- + R)$. The curvature $J'' = 1/P^- + 1/R$ is the information of the estimate, so $P^+ = 1/J''$:</p>
+$$\frac{1}{P^+} = \frac{1}{P^-} + \frac{1}{R}, \qquad P^+ = \frac{P^-R}{P^- + R} = (1 - K)P^-$$</div>
+</div><!--/qa-->
+</section>

@@ -1,0 +1,362 @@
+<section class="chapter l7" id="ch-l7">
+<header class="ch-head">
+  <div class="ch-bignum">07</div>
+  <div class="ch-kicker">Lecture 7 · Optimization</div>
+  <h1>Optimization</h1>
+  <p class="ch-sub">One recipe — pick a direction, pick a step, check — and the methods that fill it in: gradient descent, Newton, Gauss–Newton, Levenberg–Marquardt, KKT conditions, QP and SQP.</p>
+</header>
+<div class="glance">
+  <div><div class="gh">After this chapter you can</div><ul>
+    <li>test a direction for descent and classify stationary points with the Hessian</li>
+    <li>derive every direction from the quadratic model $B_k\mathbf{d}_k = -\nabla f_k$</li>
+    <li>run Armijo backtracking, Newton and Gauss–Newton steps by hand</li>
+    <li>explain LM damping and its gain-ratio step test</li>
+    <li>write and check the KKT conditions, solve an equality QP, and describe SQP with a merit function</li>
+    <li>choose a method from the structure of the problem</li>
+  </ul></div>
+  <div><div class="gh">Slide map</div><ul class="slidemap">
+    <li><span>Problem, direction &amp; step, quadratic model</span><span class="sl">s1–3</span></li>
+    <li><span>Optimality conditions, convexity</span><span class="sl">s4–5</span></li>
+    <li><span>Directions: GD, line search, Newton</span><span class="sl">s6–9</span></li>
+    <li><span>Gauss–Newton and LM</span><span class="sl">s10–13</span></li>
+    <li><span>Constraints, Lagrange, KKT</span><span class="sl">s14–17</span></li>
+    <li><span>QP, SQP, merit function, stopping</span><span class="sl">s18–23</span></li>
+    <li><span>Choosing a method</span><span class="sl">s24</span></li>
+  </ul></div>
+</div>
+
+<h2>The optimization problem</h2>
+<p>The states and parameters to optimize are collected in one decision variable $\mathbf{x}$:</p>
+$$\min_{\mathbf{x}\in\mathbb{R}^n} f(\mathbf{x}) \qquad\text{subject to}\quad h(\mathbf{x}) = 0\ \ (\text{equality}), \qquad g(\mathbf{x}) \le 0\ \ (\text{inequality})$$
+<p>$f$ is the objective to reduce; $h$ and $g$ are constraints that must hold; the points that satisfy them form the <b>feasible region</b>. A <b>local minimum</b> has no nearby feasible point with a smaller objective; a <b>global minimum</b> has no feasible point at all with a smaller objective. Whether a minimum exists and is unique are separate questions.</p>
+<div class="co recall" data-t="You have already met optimization problems"><p>Camera calibration minimizes reprojection error over $K$, $\mathbf{d}$ and poses (ch. 3); the Kalman gain minimizes the corrected variance (ch. 4, 6); pose-graph SLAM minimizes weighted relative-pose residuals (ch. 6). This lecture is the general toolbox behind all of them — and behind MPC later in the course.</p></div>
+
+<h2>Direction and step size</h2>
+<p>Every iterative method picks a <b>direction</b> $\mathbf{d}_k$ and a <b>step size</b> $\alpha_k$, then updates:</p>
+$$\mathbf{x}_{k+1} = \mathbf{x}_k + \alpha_k\mathbf{d}_k, \qquad \varphi(\alpha) = f(\mathbf{x}_k + \alpha\mathbf{d}_k), \qquad \varphi'(0) = \nabla f(\mathbf{x}_k)^\T\mathbf{d}_k$$
+<p>If $\nabla f(\mathbf{x}_k)^\T\mathbf{d}_k < 0$ the direction is a <b>descent direction</b>: for a small enough positive step the objective decreases. $\mathbf{d}$ need not be a unit vector. If the inner product is 0, first-order information cannot decide. A <b>line search</b> keeps the direction fixed while choosing $\alpha$; the direction is recomputed at the new point.</p>
+<h3>The quadratic local model</h3>
+<p>The gradient is the slope; the Hessian describes how the slope changes. With $f_k = f(\mathbf{x}_k)$, $\nabla f_k$ and $H_k = \nabla^2f(\mathbf{x}_k)$, for a displacement $\mathbf{s}$ (the actual step is $\mathbf{s} = \alpha\mathbf{d}$):</p>
+$$f(\mathbf{x}_k + \mathbf{s}) \approx f_k + \nabla f_k^\T\mathbf{s} + \tfrac12\mathbf{s}^\T H_k\mathbf{s}, \qquad m_k(\mathbf{s}) = f_k + \nabla f_k^\T\mathbf{s} + \tfrac12\mathbf{s}^\T B_k\mathbf{s}$$
+<p>$B_k$ is the <b>curvature matrix used for the direction</b>. With $B_k = H_k$ it is the Taylor model; other choices trade cost against stability — and an arbitrary $B$ need not be close to $H$.</p>
+
+<h2>Optimality conditions</h2>
+<p>At an interior point of a twice-differentiable $f$:</p>
+<table class="tbl">
+  <tr><th style="width:20%"></th><th>Condition</th><th style="width:38%">Meaning</th></tr>
+  <tr><td><b>Necessary</b></td><td>local minimum $\Rightarrow\ \nabla f = 0,\ H \succeq 0$</td><td>flat, and nowhere curving down</td></tr>
+  <tr><td><b>Sufficient</b></td><td>$\nabla f = 0,\ H \succ 0 \Rightarrow$ strict local minimum</td><td>$\mathbf{d}^\T H\mathbf{d} > 0$ for every $\mathbf{d} \ne 0$</td></tr>
+  <tr><td><b>Saddle</b></td><td>$\nabla f = 0$, $H$ indefinite</td><td>positive and negative curvature coexist</td></tr>
+</table>
+<p>A singular positive-semidefinite Hessian is inconclusive (higher-order terms decide).</p>
+<figure class="fig"><div class="panel"><img src="fig/l7_curvature.svg" alt=""></div>
+<figcaption>Positive definite: moving a little in any direction increases $f$. Indefinite: $f$ increases along one direction and decreases along another.</figcaption></figure>
+<div class="co example" data-t="Worked example · classify stationary points">
+<p>$f(x, y) = x^3 - 3x + y^2$: $\nabla f = (3x^2 - 3,\ 2y) = 0$ at $(1, 0)$ and $(-1, 0)$; $H = \diag(6x, 2)$.</p>
+<ul>
+<li>$(1, 0)$: $H = \diag(6, 2) \succ 0$ → strict local minimum ($f = -2$).</li>
+<li>$(-1, 0)$: $H = \diag(-6, 2)$, indefinite → saddle point.</li>
+</ul>
+<p>Not a global minimum either: $f \to -\infty$ as $x \to -\infty$.</p>
+</div>
+<h3>Convexity</h3>
+<p>$f$ is <b>convex</b> if it stays below every chord: $f((1-t)\mathbf{x} + t\mathbf{y}) \le (1 - t)f(\mathbf{x}) + tf(\mathbf{y})$ for $0 \le t \le 1$. For differentiable $f$ this is equivalent to lying above every tangent:</p>
+$$f(\mathbf{y}) \ge f(\mathbf{x}) + \nabla f(\mathbf{x})^\T(\mathbf{y} - \mathbf{x}) \qquad\Rightarrow\qquad \nabla f(\mathbf{x}^\star) = 0 \;\Rightarrow\; f(\mathbf{y}) \ge f(\mathbf{x}^\star)\ \ \forall\mathbf{y}$$
+<figure class="fig"><div class="panel"><img src="fig/l7_convex.svg" alt=""></div>
+<figcaption>For a convex function a point with zero gradient is a <b>global</b> minimum (Boyd &amp; Vandenberghe, ch. 3).</figcaption></figure>
+<div class="co intuition"><p>Linear least squares is convex — one stationary point, found in one step. Problems with rotations (calibration, pose graphs) are not, so they can have several local minima: that is why chapter 3 and 6 insist on good <b>initial values</b> (linear estimates, odometry) before the nonlinear refinement.</p></div>
+
+<h2>Computing a direction from the model</h2>
+<p>Set the gradient of the quadratic model to zero:</p>
+$$\nabla_\mathbf{s}m_k(\mathbf{d}_k) = \nabla f_k + B_k\mathbf{d}_k = 0 \qquad\Rightarrow\qquad \boxed{B_k\mathbf{d}_k = -\nabla f_k}$$
+<p>If $B_k \succ 0$ the model has a unique minimum and the direction is a descent direction:</p>
+$$\nabla f_k \ne 0 \;\Rightarrow\; \nabla f_k^\T\mathbf{d}_k = -\mathbf{d}_k^\T B_k\mathbf{d}_k < 0$$
+<div class="flow">
+  <div class="st"><b>Choose B</b>identity, Hessian, $J^\T J$, $J^\T J + \eta I$ …</div><div class="ar">›</div>
+  <div class="st"><b>Direction</b>solve $B\mathbf{d} = -\nabla f$</div><div class="ar">›</div>
+  <div class="st"><b>Step size</b>line search, or accept/reject test</div><div class="ar">›</div>
+  <div class="st"><b>Update</b>$\mathbf{x} \leftarrow \mathbf{x} + \alpha\mathbf{d}$, check stopping</div>
+</div>
+<p>Each method below chooses $B$ differently. Solve the linear system — never form $B^{-1}$ explicitly (more work, less accurate).</p>
+
+<h2>Gradient descent and line search</h2>
+<p>Taking the curvature matrix as the identity:</p>
+$$B_k = I \;\Rightarrow\; \mathbf{d}_k = -\nabla f_k, \qquad \mathbf{x}_{k+1} = \mathbf{x}_k - \alpha_k\nabla f(\mathbf{x}_k), \qquad \nabla f_k^\T\mathbf{d}_k = -\|\nabla f_k\|_2^2 < 0$$
+<p>It is a descent direction wherever $\nabla f_k \ne 0$ and very cheap, but it ignores how curvature differs between directions. When the differences are large it zigzags and slows down:</p>
+<figure class="fig"><div class="panel"><img src="fig/l7_gd_newton.svg" alt=""></div>
+<figcaption>Recomputed: gradient descent with exact line search (each new direction is perpendicular to the last) versus one Newton step on the same quadratic.</figcaption></figure>
+<div class="co beyond"><p>On a quadratic with condition number $\kappa = \lambda_\max/\lambda_\min$ (here $20/2 = 10$), exact-line-search gradient descent reduces the error by at worst a factor $\left(\frac{\kappa - 1}{\kappa + 1}\right)^2 \approx 0.67$ per step. As $\kappa$ grows this factor approaches 1 — badly scaled problems are slow for first-order methods.</p></div>
+<h3>Backtracking with the Armijo condition</h3>
+<p>Hold the direction fixed and accept a step only if it achieves a fraction $c_1$ of the decrease the slope predicts (<b>sufficient decrease</b>):</p>
+$$f(\mathbf{x}_k + \alpha\mathbf{d}_k) \le f_k + c_1\,\alpha\,\nabla f_k^\T\mathbf{d}_k, \qquad \nabla f_k^\T\mathbf{d}_k < 0,\quad 0 < c_1 < 1,\quad 0 < \beta < 1$$
+<p>Try $\alpha \leftarrow 1$ first; while the test fails, shrink $\alpha \leftarrow \beta\alpha$. This sets the step for the current direction; it does not guarantee a global minimum.</p>
+<figure class="fig"><div class="panel"><img src="fig/l7_armijo.svg" alt=""></div>
+<figcaption>Accept α where the curve lies below the Armijo line (dashed). Because $c_1 < 1$ the line is flatter than the tangent, so small enough steps always pass.</figcaption></figure>
+<div class="co example" data-t="Worked example · backtracking by hand">
+<p>$f(x) = x^2$ at $x_0 = 1$: $\nabla f = 2$, $d = -2$, $c_1 = 0.5$, $\beta = 0.5$.</p>
+<ol class="steps">
+<li>$\alpha = 1$: $f(1 - 2) = 1$; test value $1 + 0.5 \cdot 1 \cdot (2)(-2) = -1$. $1 \le -1$? No → shrink.</li>
+<li>$\alpha = 0.5$: $f(0) = 0$; test value $1 + 0.5 \cdot 0.5 \cdot (-4) = 0$. $0 \le 0$ ✓ → accept, $x_1 = 0$ (here exactly the minimum).</li>
+</ol>
+</div>
+
+<h2>Newton's method</h2>
+<p>Use the actual Hessian so the direction accounts for curvature:</p>
+$$B_k = H_k = \nabla^2f(\mathbf{x}_k): \qquad H_k\mathbf{d}_k = -\nabla f_k, \qquad \nabla f_k^\T\mathbf{d}_k = -\mathbf{d}_k^\T H_k\mathbf{d}_k < 0\ \ \text{if}\ H_k \succ 0$$
+<p>The direction comes from an approximate model, so a line search still checks the actual decrease ($0 < \alpha_k \le 1$; near the solution $\alpha = 1$ is accepted and convergence is very fast). If $H_k$ is not positive definite, a corrected $B_k \succ 0$ is used instead (e.g. $H_k + \lambda I$).</p>
+<div class="co example" data-t="Worked example · one Newton step versus gradient descent">
+<p>$f = (x_1 - 1)^2 + 10(x_2 - 2)^2$ from $\mathbf{x}_0 = (0, 0)$: $\nabla f = (-2, -40)$, $H = \diag(2, 20)$.</p>
+<ul>
+<li><b>Newton:</b> $\mathbf{d} = -H^{-1}\nabla f = (1, 2)$ → $\mathbf{x}_1 = (1, 2)$, the exact minimum, in one step (a quadratic model of a quadratic is exact).</li>
+<li><b>Gradient descent, exact line search:</b> $\alpha = \frac{\nabla f^\T\nabla f}{\nabla f^\T H\nabla f} \approx 0.0501$ → $\mathbf{x}_1 \approx (0.100, 2.004)$: $x_2$ is nearly solved, $x_1$ barely moved — and the zigzag of the figure above follows.</li>
+</ul>
+</div>
+<div class="co pitfall" data-t="Watch out · Newton seeks stationary points, not minima"><p>For $f(x) = x^4 - 2x^2$ (minima at $\pm1$, maximum at 0) start Newton at $x_0 = 0.4$, where $f'' = -2.08 < 0$. The iterates go $0.4 \to -0.246 \to 0.036 \to 0.000$ while $f$ <em>rises</em> from −0.29 to 0: pure Newton converged to the <b>maximum</b>. With $H \not\succ 0$ the Newton direction can point uphill — hence the line search and the positive-definite correction.</p></div>
+
+<h2>Gauss–Newton for least squares</h2>
+<p>In least-squares problems the objective is half the squared norm of a residual vector $\mathbf{r}(\mathbf{x})$ (all the errors), with Jacobian $J_{ij} = \partial r_i/\partial x_j$:</p>
+$$f(\mathbf{x}) = \tfrac12\|\mathbf{r}(\mathbf{x})\|_2^2, \qquad \mathbf{r}(\mathbf{x}_k + \mathbf{d}) \approx \mathbf{r}_k + J_k\mathbf{d}, \qquad \min_\mathbf{d}\tfrac12\|\mathbf{r}_k + J_k\mathbf{d}\|_2^2$$
+$$J_k^\T(\mathbf{r}_k + J_k\mathbf{d}_k) = 0 \qquad\Rightarrow\qquad \boxed{J_k^\T J_k\,\mathbf{d}_k = -J_k^\T\mathbf{r}_k}$$
+<p>If $J_k$ has full column rank, $J_k^\T J_k \succ 0$ and the direction is unique. Comparing with the true derivatives shows which term Gauss–Newton drops:</p>
+$$\nabla f = J^\T\mathbf{r}, \qquad \nabla^2f = \underbrace{J^\T J}_{\text{first derivatives}} + \underbrace{\sum_{i=1}^m r_i\nabla^2r_i}_{\text{needs second derivatives}}, \qquad B_k^\text{GN} = J_k^\T J_k$$
+<ul>
+<li>If $\mathbf{r}(\mathbf{x}) = A\mathbf{x} - \mathbf{b}$ (linear), $\nabla^2r_i = 0$: Gauss–Newton is exact and gives the normal equations $A^\T A\mathbf{x} = A^\T\mathbf{b}$.</li>
+<li>If the residuals are small at the solution and their curvature moderate, the dropped term is small → near-Newton speed without second derivatives.</li>
+<li>If $J^\T J$ is nearly singular, even a small approximation error can strongly affect the direction.</li>
+</ul>
+<div class="co example" data-t="Worked example · Gauss–Newton on one residual">
+<p>Find $x$ with $r(x) = x^2 - 2 = 0$: $J = 2x$, so $d = -r/J$ and $x \leftarrow x - \frac{x^2 - 2}{2x}$. From $x_0 = 1$: $1.5 \to 1.41667 \to 1.41422$ — √2 to five digits after three steps. (For a single residual with a square Jacobian, GN coincides with Newton's root-finding iteration.)</p>
+</div>
+
+<h2>Levenberg–Marquardt</h2>
+<p>If the objective does not decrease enough, either shrink the step or recompute the direction. LM penalizes large steps:</p>
+$$\min_\mathbf{s}\ \tfrac12\|\mathbf{r}_k + J_k\mathbf{s}\|_2^2 + \frac{\eta_k}{2}\|\mathbf{s}\|_2^2 \qquad\Rightarrow\qquad (J_k^\T J_k + \eta_kI)\,\mathbf{d}_k = -J_k^\T\mathbf{r}_k$$
+<p>With $\eta > 0$ the matrix is positive definite even when $J$ is rank-deficient.</p>
+<table class="tbl">
+  <tr><th style="width:24%"></th><th>Newton / GN + line search</th><th>LM damping</th></tr>
+  <tr><td><b>Mechanism</b></td><td>direction computed once; keep $\mathbf{d}_k$ and shrink only α (candidates on one line)</td><td>raise $\eta_k$ and solve again: both size <b>and direction</b> change</td></tr>
+  <tr><td><b>Small $\eta$</b></td><td rowspan="2">—</td><td>≈ Gauss–Newton step (fast near the solution)</td></tr>
+  <tr><td><b>Large $\eta$</b></td><td>$\mathbf{d} \approx -J^\T\mathbf{r}/\eta$: a short gradient-descent step (safe far away)</td></tr>
+</table>
+<h3>Accepting or rejecting a step</h3>
+<p>Compare the actual decrease with the decrease predicted by the Gauss–Newton model (without the damping term):</p>
+$$q_k(\mathbf{d}) = \tfrac12\|\mathbf{r}_k + J_k\mathbf{d}\|_2^2, \qquad a_k = f(\mathbf{x}_k) - f(\mathbf{x}_k + \mathbf{d}_k), \qquad p_k = q_k(0) - q_k(\mathbf{d}_k) > 0, \qquad \gamma_k = \frac{a_k}{p_k}$$
+<ul>
+<li>$\gamma_k \approx 1$: the model predicts well; $\gamma_k \le 0$: the objective did not decrease.</li>
+<li><b>Accept</b> if $\gamma_k > \tau$ ($0 < \tau < 1$): $\mathbf{x}_{k+1} = \mathbf{x}_k + \mathbf{d}_k$; if the prediction was accurate, $\eta$ can be reduced next time.</li>
+<li><b>Reject</b> if $\gamma_k \le \tau$: stay, raise $\eta_k$, recompute $\mathbf{d}_k$, re-evaluate.</li>
+</ul>
+<figure class="fig"><div class="panel"><img src="fig/l7_lm.svg" alt=""></div>
+<figcaption>Recomputed example: fitting $a e^{bt}$ from a poor start. Full Gauss–Newton steps overshoot (the cost explodes) and end at a wrong fit; LM's step control converges in a few iterations; gradient descent gets there more slowly.</figcaption></figure>
+<div class="co tip"><p>Typical numbers question: $f(\mathbf{x}_k) = 10$, predicted reduction $p_k = 4$, and the trial point gives $f = 7$: $\gamma = 3/4 = 0.75 > \tau$ → accept (and you may decrease $\eta$). If the trial point gives $f = 10.5$: $\gamma = -0.125$ → reject and increase $\eta$.</p></div>
+
+<h2>Constraints and feasible directions</h2>
+<p>With constraints, the direction must also respect them (to first order, at a feasible $\mathbf{x}$):</p>
+<div class="figrow">
+<div class="co formula" data-t="Equality constraint" style="margin:0">
+$$h(\mathbf{x} + \alpha\mathbf{d}) \approx h(\mathbf{x}) + \alpha J_h\mathbf{d} \;\Rightarrow\; J_h\mathbf{d} = 0$$
+<p class="small">Move along the tangent of the constraint surface.</p>
+</div>
+<div class="co formula" data-t="Active inequality constraint" style="margin:0">
+$$\nabla g_i(\mathbf{x})^\T\mathbf{d} \le 0$$
+<p class="small">Move inward or tangentially; inactive inequalities ($g_i < 0$) do not restrict small steps.</p>
+</div>
+</div>
+<p>With nonlinear constraints a straight step along the tangent satisfies the first-order condition but can still leave the surface — later methods must correct for that. (For affine constraints the linear form is exact.)</p>
+
+<h2>Lagrange multipliers and the KKT conditions</h2>
+<h3>One equality constraint</h3>
+<p>At a constrained minimum, every tangent direction ($\nabla h^\T\mathbf{d} = 0$) must have zero rate of change ($\nabla f^\T\mathbf{d} = 0$) — otherwise moving along it, or opposite to it, would decrease $f$. So $\nabla f$ is perpendicular to the constraint's tangent, i.e. parallel to $\nabla h$:</p>
+$$\nabla f + \lambda\nabla h = 0, \qquad \mathcal{L}(\mathbf{x}, \boldsymbol\lambda) = f(\mathbf{x}) + \boldsymbol\lambda^\T h(\mathbf{x}), \qquad \text{several constraints: } \nabla f + J_h^\T\boldsymbol\lambda = 0$$
+<p>$\lambda$ relates the two gradients and is <b>unrestricted in sign</b>. This describes a <em>regular</em> local minimum: $\nabla h \ne 0$ (one constraint) or $J_h$ of full row rank (several).</p>
+<div class="co example" data-t="Worked example · Lagrange">
+<p>Minimize $x^2 + y^2$ subject to $x + y = 1$: $2x + \lambda = 0$, $2y + \lambda = 0$, $x + y = 1$ → $x = y = 0.5$, $\lambda = -1$, $f^* = 0.5$.</p>
+<p class="small">Beyond the slides: $-\lambda$ is the sensitivity of the optimal cost to the constraint level. For $x + y = c$, $f^*(c) = c^2/2$ and $df^*/dc = c = 1 = -\lambda$.</p>
+</div>
+<h3>One inequality constraint</h3>
+<p>On an active boundary $g(\mathbf{x}) = 0$ inward moves are allowed, which fixes the multiplier's sign:</p>
+$$\nabla g^\T\mathbf{d} \le 0 \;\Rightarrow\; \nabla f^\T\mathbf{d} \ge 0 \qquad\Rightarrow\qquad \nabla f + \mu\nabla g = 0,\quad \mu \ge 0 \qquad (-\nabla f = \mu\nabla g)$$
+<p>The objective "wants" to leave the feasible set (its descent direction $-\nabla f$ points outward, along $\nabla g$). <b>Complementarity</b>: if the constraint is slack, $g(\mathbf{x}) < 0 \Rightarrow \mu = 0$; in general $\mu\,g(\mathbf{x}) = 0$ ($\mu$ can also be 0 on the boundary).</p>
+<figure class="fig"><div class="panel"><img src="fig/l7_kkt.svg" alt=""></div>
+<figcaption>Left: the unconstrained minimum (×) is outside the disk, so the optimum sits on the boundary with $\nabla f$ and $\nabla g$ pointing in opposite directions. Right: the unconstrained minimum is feasible, the constraint is inactive and $\mu = 0$.</figcaption></figure>
+<div class="co key" data-t="KKT conditions (slide 17)">
+$$\mathcal{L}(\mathbf{x}, \boldsymbol\lambda, \boldsymbol\mu) = f(\mathbf{x}) + \boldsymbol\lambda^\T h(\mathbf{x}) + \boldsymbol\mu^\T g(\mathbf{x})$$
+<table class="tbl compact" style="margin:4px 0 6px">
+  <tr><td style="width:30%"><b>Stationarity</b></td><td>$\nabla_\mathbf{x}\mathcal{L} = \nabla f + J_h^\T\boldsymbol\lambda + J_g^\T\boldsymbol\mu = 0$</td></tr>
+  <tr><td><b>Primal feasibility</b></td><td>$h(\mathbf{x}) = 0,\ g(\mathbf{x}) \le 0$</td></tr>
+  <tr><td><b>Dual feasibility</b></td><td>$\boldsymbol\mu \ge 0$</td></tr>
+  <tr><td><b>Complementarity</b></td><td>$\mu_ig_i(\mathbf{x}) = 0$ for all $i$</td></tr>
+</table>
+<p><b>Necessary:</b> at a local minimum where LICQ holds (gradients of the equalities and active inequalities are linearly independent), KKT is satisfied. <b>Sufficient:</b> with convex $f$, $g_i$ and affine $h$, a KKT point is a global minimum. $\boldsymbol\lambda$ is sign-free; for nonconvex problems KKT alone does not guarantee a minimum.</p>
+</div>
+<div class="co example" data-t="Worked example · active or inactive?">
+<p>Minimize $(x - 2)^2$ subject to $x \le 1$, i.e. $g(x) = x - 1 \le 0$.</p>
+<ul>
+<li>Guess active ($x = 1$): stationarity $2(1 - 2) + \mu = 0 \Rightarrow \mu = 2 \ge 0$ ✓, complementarity $2 \cdot 0 = 0$ ✓ → KKT point, and since the problem is convex, the global minimum.</li>
+<li>With $x \le 3$ instead: the unconstrained minimum $x = 2$ is feasible ($g = -1 < 0$), so $\mu = 0$ and $x^* = 2$.</li>
+</ul>
+</div>
+
+<h2>Quadratic programming</h2>
+<p>A quadratic objective with linear constraints. With equalities only, the KKT conditions are <b>linear</b>, so one linear solve gives both the optimum and the multipliers:</p>
+$$\min_\mathbf{x}\ \tfrac12\mathbf{x}^\T Q\mathbf{x} + \mathbf{q}^\T\mathbf{x}\ \ \text{s.t.}\ A\mathbf{x} = \mathbf{b}, \qquad Q = Q^\T,\ \nabla f = Q\mathbf{x} + \mathbf{q}$$
+$$Q\mathbf{x} + \mathbf{q} + A^\T\boldsymbol\lambda = 0,\quad A\mathbf{x} = \mathbf{b} \qquad\Longleftrightarrow\qquad \begin{bmatrix} Q & A^\T \\ A & 0 \end{bmatrix}\begin{bmatrix} \mathbf{x} \\ \boldsymbol\lambda \end{bmatrix} = \begin{bmatrix} -\mathbf{q} \\ \mathbf{b} \end{bmatrix}$$
+<p>$Q \succeq 0$ makes it a convex QP; $Q \succ 0$ with $A$ of full row rank is sufficient for unique primal and dual solutions.</p>
+<div class="co example" data-t="Worked example · an equality QP">
+<p>$Q = \diag(2, 4)$, $\mathbf{q} = (-2, -4)$, constraint $x_1 + x_2 = 1$:</p>
+$$\begin{bmatrix} 2 & 0 & 1 \\ 0 & 4 & 1 \\ 1 & 1 & 0 \end{bmatrix}\begin{bmatrix} x_1 \\ x_2 \\ \lambda \end{bmatrix} = \begin{bmatrix} 2 \\ 4 \\ 1 \end{bmatrix} \;\Rightarrow\; x_1 = \tfrac13,\ x_2 = \tfrac23,\ \lambda = \tfrac43$$
+<p>Without the constraint the minimum would be $Q^{-1}(-\mathbf{q}) = (1, 1)$, which violates $x_1 + x_2 = 1$; the constraint pulls the solution onto the line, more strongly in the cheaper direction $x_1$ (smaller curvature).</p>
+</div>
+<p><b>With inequalities</b> $G\mathbf{x} \le \mathbf{b}_g$ you must also decide which ones are <b>active</b> at the optimum: equalities always hold; for inequalities, check whether equality holds. <b>Active-set</b> methods estimate the active set, solve the equality QP, and revise the set using the multiplier signs and feasibility; <b>interior-point</b> methods also solve QPs.</p>
+
+<h2>Sequential quadratic programming</h2>
+<p>A general nonlinear problem is approximated by a QP around the current point:</p>
+$$\min_\mathbf{d}\ \nabla f_k^\T\mathbf{d} + \tfrac12\mathbf{d}^\T B_k\mathbf{d} \quad\text{s.t.}\quad h_k + J_{h,k}\mathbf{d} = 0, \quad g_k + J_{g,k}\mathbf{d} \le 0, \qquad B_k \approx \nabla^2_{\mathbf{xx}}\mathcal{L}(\mathbf{x}_k, \boldsymbol\lambda_k, \boldsymbol\mu_k)$$
+<ul>
+<li>$B_k$ approximates the Hessian of the <b>Lagrangian</b>, so it reflects the curvature of both the objective and the constraints.</li>
+<li>The current point may be infeasible, so the constant terms $h_k$, $g_k$ are kept.</li>
+<li>In the basic form $B_k$ is corrected to be positive definite.</li>
+</ul>
+<figure class="fig"><div class="panel">
+<svg class="dia" viewBox="0 0 660 130" width="660" height="130">
+  <defs><marker id="a10" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#8a94a7"/></marker></defs>
+  <rect x="6" y="10" width="140" height="66" rx="10" class="f-surface2" stroke="#4ade80"/>
+  <text x="18" y="32" class="ttl" style="fill:#4ade80">Functions</text>
+  <text x="18" y="50" class="lbl">f, h, g</text><text x="18" y="66" class="lbl">∇f, J<tspan class="sub" dy="3">h</tspan><tspan dy="-3">, J</tspan><tspan class="sub" dy="3">g</tspan></text>
+  <rect x="176" y="10" width="140" height="66" rx="10" class="f-surface2" stroke="#4ade80"/>
+  <text x="188" y="32" class="ttl" style="fill:#4ade80">Build the QP</text>
+  <text x="188" y="50" class="lbl">local approximate</text><text x="188" y="66" class="lbl">problem with B<tspan class="sub" dy="3">k</tspan></text>
+  <rect x="346" y="10" width="140" height="66" rx="10" class="f-surface2" stroke="#4ade80"/>
+  <text x="358" y="32" class="ttl" style="fill:#4ade80">Solve the QP</text>
+  <text x="358" y="50" class="lbl">direction d<tspan class="sub" dy="3">k</tspan><tspan dy="-3"> and</tspan></text><text x="358" y="66" class="lbl">multipliers λ, μ</text>
+  <rect x="516" y="10" width="138" height="66" rx="10" class="f-surface2" stroke="#4ade80"/>
+  <text x="528" y="32" class="ttl" style="fill:#4ade80">Choose the step</text>
+  <text x="528" y="50" class="lbl">α<tspan class="sub" dy="3">k</tspan><tspan dy="-3"> on the merit</tspan></text><text x="528" y="66" class="lbl">function ψ</text>
+  <line x1="147" y1="43" x2="174" y2="43" stroke="#8a94a7" stroke-width="1.5" marker-end="url(#a10)"/>
+  <line x1="317" y1="43" x2="344" y2="43" stroke="#8a94a7" stroke-width="1.5" marker-end="url(#a10)"/>
+  <line x1="487" y1="43" x2="514" y2="43" stroke="#8a94a7" stroke-width="1.5" marker-end="url(#a10)"/>
+  <path d="M 585 77 L 585 108 L 76 108 L 76 80" fill="none" stroke="#8a94a7" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#a10)"/>
+  <text x="120" y="124" class="lbl">x<tspan class="sub" dy="3">k+1</tspan><tspan dy="-3"> = x</tspan><tspan class="sub" dy="3">k</tspan><tspan dy="-3"> + α</tspan><tspan class="sub" dy="3">k</tspan><tspan dy="-3">d</tspan><tspan class="sub" dy="3">k</tspan><tspan dy="-3">: recompute functions and derivatives at the new point; update the multiplier estimates</tspan></text>
+</svg></div>
+<figcaption>The SQP iteration (slide 21). A feasible QP solution is assumed; if none exists, the constraints must be relaxed or handled separately.</figcaption></figure>
+<h3>Line search with constraints: the merit function</h3>
+<p>A step can lower $f$ while violating the constraints more, so both are combined:</p>
+$$V(\mathbf{x}) = \|h(\mathbf{x})\|_1 + \sum_i\max(g_i(\mathbf{x}), 0), \qquad \psi_\rho(\mathbf{x}) = f(\mathbf{x}) + \rho\,V(\mathbf{x}),\quad \rho > 0$$
+<p>$V$ adds how far each equality is from 0 and only the positive parts of the inequalities; $V = 0$ exactly when every constraint holds. Choose α so that ψ decreases enough, with ρ fixed during one line search. A decrease in ψ does not mean that every constraint holds or that a minimum has been reached.</p>
+<h3>When to stop</h3>
+<table class="tbl compact">
+  <tr><th style="width:28%">Condition</th><th>Test (tolerance ε)</th></tr>
+  <tr><td>stationarity</td><td>$\|\nabla_\mathbf{x}\mathcal{L}\|_\infty \le \varepsilon$</td></tr>
+  <tr><td>primal feasibility</td><td>$\|h(\mathbf{x})\|_\infty \le \varepsilon,\ \max_ig_i(\mathbf{x}) \le \varepsilon$</td></tr>
+  <tr><td>dual feasibility</td><td>$\mu_i \ge -\varepsilon$ for all $i$</td></tr>
+  <tr><td>complementarity</td><td>$\max_i|\mu_ig_i(\mathbf{x})| \le \varepsilon$</td></tr>
+</table>
+<p>Even when the step or the objective change is small, the KKT conditions must be checked separately — a method can stall far from a solution. In nonconvex problems a small KKT error does not guarantee a minimum. Scale each tolerance to its condition; for unconstrained problems, check the gradient norm.</p>
+
+<h2>Choosing a method</h2>
+<table class="tbl">
+  <tr><th style="width:34%">Problem structure</th><th style="width:26%">Method</th><th>Uses</th></tr>
+  <tr><td>unconstrained $\min_\mathbf{x}f(\mathbf{x})$</td><td><b>Gradient descent / Newton</b></td><td>direction from the gradient or the Hessian</td></tr>
+  <tr><td>nonlinear least squares $\tfrac12\|\mathbf{r}(\mathbf{x})\|^2$</td><td><b>Gauss–Newton / LM</b></td><td>the residual and its Jacobian — calibration (ch. 3), pose graphs (ch. 6)</td></tr>
+  <tr><td>quadratic objective + linear constraints</td><td><b>QP solver</b></td><td>equality: KKT system; inequality: active-set, interior-point (e.g. linear MPC)</td></tr>
+  <tr><td>nonlinear objective and constraints</td><td><b>SQP</b></td><td>approximate with a QP and iterate</td></tr>
+</table>
+<p>Whatever the method: find a direction, choose a step size, then check the stopping criteria.</p>
+
+<h2>Formula sheet</h2>
+<div class="fsheet">
+  <div class="f"><div class="n">Update · descent test</div><div class="eq">$\mathbf{x}_{k+1} = \mathbf{x}_k + \alpha_k\mathbf{d}_k,\ \ \nabla f_k^\T\mathbf{d}_k < 0$</div></div>
+  <div class="f"><div class="n">Quadratic model · direction</div><div class="eq">$m_k = f_k + \nabla f_k^\T\mathbf{s} + \tfrac12\mathbf{s}^\T B_k\mathbf{s},\ \ B_k\mathbf{d}_k = -\nabla f_k$</div></div>
+  <div class="f"><div class="n">Optimality</div><div class="eq">$\nabla f = 0,\ H \succ 0 \Rightarrow$ strict local min; indefinite → saddle</div></div>
+  <div class="f"><div class="n">Convexity</div><div class="eq">$f(\mathbf{y}) \ge f(\mathbf{x}) + \nabla f(\mathbf{x})^\T(\mathbf{y} - \mathbf{x})$</div></div>
+  <div class="f"><div class="n">Armijo</div><div class="eq">$f(\mathbf{x}_k + \alpha\mathbf{d}_k) \le f_k + c_1\alpha\nabla f_k^\T\mathbf{d}_k,\ \alpha \leftarrow \beta\alpha$</div></div>
+  <div class="f"><div class="n">GD · Newton</div><div class="eq">$\mathbf{d} = -\nabla f;\ \ H\mathbf{d} = -\nabla f$</div></div>
+  <div class="f"><div class="n">Gauss–Newton</div><div class="eq">$J^\T J\mathbf{d} = -J^\T\mathbf{r},\ \ \nabla^2f = J^\T J + \sum r_i\nabla^2r_i$</div></div>
+  <div class="f"><div class="n">Levenberg–Marquardt</div><div class="eq">$(J^\T J + \eta I)\mathbf{d} = -J^\T\mathbf{r},\ \ \gamma = a_k/p_k$</div></div>
+  <div class="f"><div class="n">Lagrange</div><div class="eq">$\nabla f + J_h^\T\boldsymbol\lambda = 0,\ \ \mathcal{L} = f + \boldsymbol\lambda^\T h$</div></div>
+  <div class="f"><div class="n">KKT</div><div class="eq">$\nabla f + J_h^\T\boldsymbol\lambda + J_g^\T\boldsymbol\mu = 0,\ \boldsymbol\mu \ge 0,\ \mu_ig_i = 0$</div></div>
+  <div class="f"><div class="n">Equality QP</div><div class="eq">$\begin{bmatrix} Q & A^\T \\ A & 0 \end{bmatrix}\begin{bmatrix} \mathbf{x} \\ \boldsymbol\lambda \end{bmatrix} = \begin{bmatrix} -\mathbf{q} \\ \mathbf{b} \end{bmatrix}$</div></div>
+  <div class="f"><div class="n">SQP merit function</div><div class="eq">$\psi_\rho = f + \rho\left(\|h\|_1 + \sum\max(g_i, 0)\right)$</div></div>
+</div>
+
+<h2>Practice questions</h2>
+<div class="qa" data-type="concept" data-level="1">
+<div class="q"><p>Distinguish a local from a global minimum. Why does convexity matter so much in practice? Name one nonconvex problem from this course.</p></div>
+<div class="a"><p>A local minimum beats every <em>nearby</em> feasible point; a global minimum beats <em>every</em> feasible point. Iterative methods only use local information, so in general they find local minima. For a convex problem every local minimum is global (and a zero-gradient point is optimal), so any convergent method gives the right answer. Nonconvex examples: pose-graph optimization and camera calibration (rotations/angles enter through sines and cosines), which is why they need good initial values.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="1">
+<div class="q"><p>For $f(x, y) = x^2 + 3y^2$ at $(1, 1)$, is $\mathbf{d} = (1, -1)$ a descent direction? Is $\mathbf{d} = (1, 0)$?</p></div>
+<div class="a"><p>$\nabla f = (2x, 6y) = (2, 6)$. For $(1, -1)$: $\nabla f^\T\mathbf{d} = 2 - 6 = -4 < 0$ → descent. For $(1, 0)$: $2 > 0$ → ascent (moving in $+x$ increases $f$ initially).</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>Find and classify all stationary points of $f(x, y) = x^3 - 3x + y^2$.</p></div>
+<div class="a"><p>$\nabla f = (3x^2 - 3, 2y) = 0 \Rightarrow (\pm1, 0)$. $H = \diag(6x, 2)$. At $(1, 0)$: $\diag(6, 2) \succ 0$ → strict local minimum, $f = -2$. At $(-1, 0)$: $\diag(-6, 2)$, indefinite → saddle. The local minimum is not global ($f \to -\infty$ as $x \to -\infty$), so the function is not convex.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>Run backtracking with the Armijo condition on $f(x) = x^2$ from $x_0 = 1$ along $d = -f'(x_0)$, using $c_1 = 10^{-4}$ and $\beta = 0.5$. Which α is accepted? Why is α = 1 rejected even though it does not increase $f$?</p></div>
+<div class="a"><p>$f' = 2$, $d = -2$, $\nabla f^\T d = -4$. α = 1: $x = -1$, $f = 1$; test $1 \le 1 + 10^{-4}(1)(-4) = 0.9996$? No. α = 0.5: $x = 0$, $f = 0 \le 1 - 0.0002$ ✓ → accept. α = 1 does not decrease $f$ at all ($1 \to 1$, it jumps across the valley); Armijo demands a decrease proportional to the step and the slope, which rules out such useless steps.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>On $f = (x_1 - 1)^2 + 10(x_2 - 2)^2$ from $(0, 0)$, compare one Newton step with one exact-line-search gradient step. Explain the zigzag of gradient descent.</p></div>
+<div class="a"><p>Newton: $\mathbf{d} = -\diag(2, 20)^{-1}(-2, -40) = (1, 2)$ → $(1, 2)$, the minimum, in one step. Gradient: $\nabla f = (-2, -40)$, $\alpha = \|\nabla f\|^2/(\nabla f^\T H\nabla f) \approx 0.0501$ → $(0.100, 2.004)$. The gradient is dominated by the steep $x_2$ direction (curvature 20 vs 2), so the step nearly solves $x_2$ and hardly moves $x_1$. With exact line search consecutive gradients are orthogonal, so the iterates zigzag across the narrow valley; the contraction per step is about $((\kappa - 1)/(\kappa + 1))^2 \approx 0.67$ with $\kappa = 10$.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="3">
+<div class="q"><p>Apply pure Newton ($\alpha = 1$) to $f(x) = x^4 - 2x^2$ from $x_0 = 0.4$. Where does it converge, and what safeguard would have prevented this?</p></div>
+<div class="a"><p>$f' = 4x^3 - 4x$, $f'' = 12x^2 - 4$. At 0.4: $f' = -1.344$, $f'' = -2.08 < 0$, $d = -f'/f'' = -0.646$ → $x_1 = -0.246$; then $0.036$, then $\approx 0$. Newton converged to $x = 0$, the local <b>maximum</b>, while $f$ rose from −0.29 to 0 — Newton solves $\nabla f = 0$ and does not care about the type of stationary point. Safeguards: check $\nabla f^\T\mathbf{d} < 0$ and replace $H$ by a positive-definite $B$ (e.g. $H + \lambda I$) when it is not, plus a line search that requires decrease (or use LM-style damping).</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="1">
+<div class="q"><p>Apply Gauss–Newton to the single residual $r(x) = x^2 - 2$ from $x_0 = 1$ for three iterations.</p></div>
+<div class="a"><p>$J = 2x$, $d = -(J^\T J)^{-1}J^\T r = -r/J$: $x_1 = 1 - (-1)/2 = 1.5$; $x_2 = 1.5 - 0.25/3 = 1.41667$; $x_3 = 1.41667 - 0.006944/2.8333 = 1.41422$. The error roughly squares each iteration (quadratic convergence for a zero-residual problem).</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>Which term of the Hessian does Gauss–Newton drop? When is the approximation exact, when is it good, and when is it poor?</p></div>
+<div class="a"><p>$\nabla^2f = J^\T J + \sum_ir_i\nabla^2r_i$; GN keeps $J^\T J$ and drops $\sum r_i\nabla^2r_i$. <b>Exact</b> when the residuals are linear ($\nabla^2r_i = 0$, e.g. $A\mathbf{x} - \mathbf{b}$). <b>Good</b> when the residuals are small near the solution (well-fitting model) or only mildly curved. <b>Poor</b> for large-residual problems with strongly curved residuals, or when $J^\T J$ is nearly singular — then GN can take huge or wrong steps, which LM's damping guards against.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>An LM step has predicted reduction $p_k = 4$ with $f(\mathbf{x}_k) = 10$, and $\tau = 0.25$. Decide what to do if the trial point gives (a) $f = 7$, (b) $f = 9.5$, (c) $f = 10.5$.</p></div>
+<div class="a"><p>(a) $\gamma = 3/4 = 0.75 > \tau$ → accept; the model is reliable, so $\eta$ may be decreased (towards Gauss–Newton). (b) $\gamma = 0.5/4 = 0.125 \le \tau$ → reject (insufficient agreement), increase $\eta$, recompute $\mathbf{d}$. (c) $\gamma = -0.5/4 = -0.125 < 0$ → the objective increased: reject and increase $\eta$, which shortens the step and turns it towards $-J^\T\mathbf{r}$.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>Explain what happens to the LM direction as $\eta \to 0$ and as $\eta \to \infty$, and why this makes LM robust.</p></div>
+<div class="a"><p>$\eta \to 0$: $(J^\T J)\mathbf{d} = -J^\T\mathbf{r}$, the Gauss–Newton step — fast near a solution. $\eta \to \infty$: $\mathbf{d} \approx -J^\T\mathbf{r}/\eta = -\nabla f/\eta$, a short gradient-descent step — guaranteed to decrease $f$ if short enough. By raising $\eta$ after a bad step and lowering it after a good one, LM blends the safety of gradient descent far from the solution with the speed of GN near it, and $J^\T J + \eta I \succ 0$ even if $J$ is rank-deficient.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>Minimize $f = x^2 + y^2$ subject to $x + y = 1$ with a Lagrange multiplier. Check that $\nabla f$ is parallel to $\nabla h$ at the solution.</p></div>
+<div class="a"><p>$\mathcal{L} = x^2 + y^2 + \lambda(x + y - 1)$: $2x + \lambda = 0$, $2y + \lambda = 0$, $x + y = 1$ → $x = y = 0.5$, $\lambda = -1$. At the solution $\nabla f = (1, 1)$ and $\nabla h = (1, 1)$: parallel ✓ ($\nabla f + \lambda\nabla h = 0$). The tangent direction $(1, -1)$ is orthogonal to $\nabla f$, so moving along the line cannot lower $f$ to first order.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>For $\min(x - 2)^2$ s.t. $x \le 1$, someone proposes $x = 0$ with $\mu = 4$. Check all four KKT conditions. Then find the true KKT point.</p></div>
+<div class="a"><p>$g = x - 1$. Stationarity: $2(0 - 2) + 4 = 0$ ✓. Primal feasibility: $0 \le 1$ ✓. Dual feasibility: $\mu = 4 \ge 0$ ✓. Complementarity: $\mu g = 4(0 - 1) = -4 \ne 0$ ✗ → not a KKT point (a positive multiplier is only allowed on an active constraint). True point: active, $x = 1$, $\mu = 2$ — all four hold, and by convexity it is the global minimum.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>Solve the equality QP $\min\tfrac12\mathbf{x}^\T\diag(2, 4)\mathbf{x} - 2x_1 - 4x_2$ subject to $x_1 + x_2 = 1$ via the KKT system. Is the solution unique?</p></div>
+<div class="a"><p>$2x_1 - 2 + \lambda = 0$, $4x_2 - 4 + \lambda = 0$, $x_1 + x_2 = 1$. From the first two, $x_1 = 1 - \lambda/2$, $x_2 = 1 - \lambda/4$; substituting, $2 - \tfrac34\lambda = 1 \Rightarrow \lambda = \tfrac43$, $x_1 = \tfrac13$, $x_2 = \tfrac23$. Unique: $Q = \diag(2, 4) \succ 0$ and $A = [1\ 1]$ has full row rank, so the KKT matrix is nonsingular.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>Why does SQP need a merit function for its line search, and what is the role of ρ?</p></div>
+<div class="a"><p>In constrained problems, a step can reduce $f$ while increasing constraint violation (or vice versa), so neither $f$ nor $V$ alone measures progress. The merit function $\psi_\rho = f + \rho V$ combines them; a step is accepted if it reduces ψ enough. ρ sets the price of violation: too small and the iterates may wander infeasibly; large enough (larger than the multipliers' magnitude, for the exact $\ell_1$ penalty) and minimizers of ψ coincide with feasible minimizers. A decrease in ψ alone still does not prove feasibility or optimality — the KKT tests do.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>Pick a method (and say why) for: (a) camera intrinsic calibration; (b) a pose graph with loop closures; (c) linear-model MPC with box limits on steering and acceleration; (d) trajectory optimization with nonlinear vehicle dynamics and obstacle-avoidance constraints.</p></div>
+<div class="a"><p>(a) and (b): nonlinear least squares → <b>Gauss–Newton/LM</b> (residuals and Jacobians are available; LM for robustness, often with sparse solvers and robust losses). (c) Quadratic cost, linear dynamics and linear inequality limits → a <b>QP</b> (active-set or interior-point), solved every control cycle. (d) Nonlinear objective and constraints → <b>SQP</b> (linearize dynamics and constraints into a QP each iteration, with a merit-function line search).</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="1">
+<div class="q"><p>An optimizer stops because the step became smaller than $10^{-8}$. Why is that not enough to declare success, and what should be checked?</p></div>
+<div class="a"><p>Tiny steps can also come from stalling: a bad scaling, an overly damped LM, a line search that keeps shrinking, or a point where progress is blocked by constraints. Success means the <b>KKT conditions</b> hold within tolerance: small stationarity residual $\|\nabla_\mathbf{x}\mathcal{L}\|_\infty$, satisfied constraints, $\mu \ge 0$ and small complementarity (for unconstrained problems, a small gradient norm). Even then, for a nonconvex problem it may be only a local minimum (or a saddle), so check curvature or try other starting points.</p></div>
+</div><!--/qa-->
+</section>

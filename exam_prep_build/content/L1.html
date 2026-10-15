@@ -1,0 +1,189 @@
+<section class="chapter l1" id="ch-l1">
+<header class="ch-head">
+  <div class="ch-bignum">01</div>
+  <div class="ch-kicker">Lecture 1 · Week 1 · Introduction</div>
+  <h1>Course map: what an intelligent robot does</h1>
+  <p class="ch-sub">The sense–compute–act loop, the four software layers of an autonomous robot, and where each later lecture fits.</p>
+</header>
+<div class="glance">
+  <div><div class="gh">After this chapter you can</div><ul>
+    <li>describe a robot as <b>sense → compute → act</b> and name hardware for each stage</li>
+    <li>name the four layers <b>perception, state estimation, planning, control</b> and what passes between them</li>
+    <li>write the generic model $x_{k+1} = f(x_k, u_k; \theta)$ and classify quantities as state, input or parameter</li>
+    <li>place every lecture of the course on that map</li>
+  </ul></div>
+  <div><div class="gh">Slide map</div><ul class="slidemap">
+    <li><span>What is a robot: sense, compute, act</span><span class="sl">s2</span></li>
+    <li><span>Robot platforms</span><span class="sl">s3</span></li>
+    <li><span>Intelligent robot system (4 layers)</span><span class="sl">s4</span></li>
+    <li><span>Modeling · perception · estimation</span><span class="sl">s5–7</span></li>
+    <li><span>Planning · control</span><span class="sl">s8–9</span></li>
+    <li><span>15-week course overview</span><span class="sl">s10</span></li>
+  </ul></div>
+</div>
+
+<h2>Sense, compute, act</h2>
+<p>Lecture 1 defines a robot by three basic functions that repeat in a loop:</p>
+<table class="tbl">
+  <tr><th style="width:17%">Stage</th><th>What happens</th><th style="width:31%">Typical hardware</th></tr>
+  <tr><td><b>1 · Sense</b></td><td>Acquire information about the <b>environment</b> and about the robot's own <b>internal state</b> with sensors.</td><td>Camera · LiDAR · IMU · wheel encoder</td></tr>
+  <tr><td><b>2 · Compute</b></td><td>Process the data and calculate the values needed for the next action.</td><td>Embedded computer running algorithms</td></tr>
+  <tr><td><b>3 · Act</b></td><td>Send the result to actuators, which change the robot's motion state.</td><td>Motors · steering · drive system</td></tr>
+</table>
+<p>The loop closes because acting changes what the robot senses next. Sensors split into two families you will meet again and again:
+<b>exteroceptive</b> sensors look outward (camera, LiDAR, radar, GNSS), while <b>proprioceptive</b> sensors measure the robot itself (wheel encoders, IMU, joint encoders, steering-angle sensors).</p>
+
+<p>The course uses the <b>autonomous vehicle</b> as its main example, but the slides stress that manipulators, quadrupeds and humanoids follow the same engineering approach:
+<em>model the system, work out its state, then generate a suitable action</em>. Lecture 2 accordingly treats both a robot arm and a car.</p>
+
+<h2>The intelligent robot software stack</h2>
+<p>Autonomous motion needs four layers. Each one consumes the output of the previous one:</p>
+<figure class="fig"><div class="panel">
+<svg class="dia" viewBox="0 0 680 272" width="680" height="272">
+  <defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#8a94a7"/></marker></defs>
+  <g>
+    <rect x="14" y="20" width="150" height="96" rx="10" class="f-surface" stroke="#a78bfa" stroke-width="1.3"/>
+    <text x="26" y="43" class="ttl" fill="#a78bfa" style="fill:#a78bfa">PERCEPTION</text>
+    <text x="26" y="63" class="lbl">sensor data → lanes,</text>
+    <text x="26" y="78" class="lbl">objects, free space</text>
+    <text x="26" y="104" style="fill:#a78bfa;font-size:10.5px">W04 · chapter 3</text>
+    <rect x="182" y="20" width="150" height="96" rx="10" class="f-surface" stroke="#fbbf24" stroke-width="1.3"/>
+    <text x="194" y="43" class="ttl" style="fill:#fbbf24">STATE ESTIMATION</text>
+    <text x="194" y="63" class="lbl">position, heading,</text>
+    <text x="194" y="78" class="lbl">velocity (+ parameters)</text>
+    <text x="194" y="104" style="fill:#fbbf24;font-size:10.5px">W05–07 · chapters 4, 6</text>
+    <rect x="350" y="20" width="150" height="96" rx="10" class="f-surface" stroke="#2dd4bf" stroke-width="1.3"/>
+    <text x="362" y="43" class="ttl" style="fill:#2dd4bf">PLANNING</text>
+    <text x="362" y="63" class="lbl">route → behavior →</text>
+    <text x="362" y="78" class="lbl">trajectory (x, y, ψ, v)</text>
+    <text x="362" y="104" style="fill:#2dd4bf;font-size:10.5px">W10–11</text>
+    <rect x="518" y="20" width="150" height="96" rx="10" class="f-surface" stroke="#fb923c" stroke-width="1.3"/>
+    <text x="530" y="43" class="ttl" style="fill:#fb923c">CONTROL</text>
+    <text x="530" y="63" class="lbl">tracking error →</text>
+    <text x="530" y="78" class="lbl">steering δ, accel. a</text>
+    <text x="530" y="104" style="fill:#fb923c;font-size:10.5px">W12–13</text>
+    <line x1="165" y1="68" x2="180" y2="68" stroke="#8a94a7" stroke-width="1.4" marker-end="url(#ah1)"/>
+    <line x1="333" y1="68" x2="348" y2="68" stroke="#8a94a7" stroke-width="1.4" marker-end="url(#ah1)"/>
+    <line x1="501" y1="68" x2="516" y2="68" stroke="#8a94a7" stroke-width="1.4" marker-end="url(#ah1)"/>
+    <rect x="14" y="160" width="316" height="58" rx="10" class="f-surface2" stroke="#3a4560"/>
+    <text x="28" y="183" class="ttl">Environment &amp; sensors</text>
+    <text x="28" y="204" class="lbl">camera · LiDAR · radar · GNSS · IMU · wheel encoders</text>
+    <rect x="350" y="160" width="318" height="58" rx="10" class="f-surface2" stroke="#22d3ee" stroke-width="1.2"/>
+    <text x="364" y="183" class="ttl" style="fill:#22d3ee">Robot / vehicle</text>
+    <text x="364" y="204" class="lbl">model  x<tspan class="sub" dy="3">k+1</tspan><tspan dy="-3"> = f(x</tspan><tspan class="sub" dy="3">k</tspan><tspan dy="-3">, u</tspan><tspan class="sub" dy="3">k</tspan><tspan dy="-3">; θ)  ·  chapter 2</tspan></text>
+    <line x1="593" y1="117" x2="593" y2="158" stroke="#8a94a7" stroke-width="1.4" marker-end="url(#ah1)"/>
+    <text x="600" y="143" class="lbl">u = [δ, a]</text>
+    <line x1="89" y1="159" x2="89" y2="118" stroke="#8a94a7" stroke-width="1.4" marker-end="url(#ah1)"/>
+    <text x="96" y="143" class="lbl">measurements z</text>
+    <line x1="420" y1="159" x2="300" y2="118" stroke="#8a94a7" stroke-width="1.4" marker-end="url(#ah1)" stroke-dasharray="4 3"/>
+    <text x="356" y="134" class="lbl">encoders, IMU</text>
+    <line x1="331" y1="189" x2="348" y2="189" stroke="#8a94a7" stroke-width="1.4" marker-end="url(#ah1)" marker-start="url(#ah1)"/>
+    <rect x="14" y="232" width="654" height="30" rx="8" fill="#13261d" stroke="#4ade80" stroke-width="1"/>
+    <text x="28" y="252" style="fill:#4ade80;font-size:11.5px;font-weight:600">Optimization (chapter 7) runs underneath: <tspan style="fill:#a3acbd;font-weight:400;font-size:11px">calibration, pose graphs and MPC all solve  min f(x)  subject to constraints</tspan></text>
+  </g>
+</svg></div>
+<figcaption>The four layers of an autonomous robot and the feedback loop through the vehicle. State estimation also reads proprioceptive sensors directly (dashed). The tags show which weeks and which chapters of these notes cover each part.</figcaption></figure>
+
+<div class="kv" style="margin: 2mm 0 3mm">
+  <span class="k">Perception</span><span>Uses sensor data to find the structure of the surroundings and the position and motion of objects: lanes, objects, free (drivable) space.</span>
+  <span class="k">State estimation</span><span>Uses measurements and a system model to estimate the robot's current state: position $(X, Y)$, heading $\psi$, velocity $v$.</span>
+  <span class="k">Planning</span><span>From the current state, the environment and a goal, produces a path or a drivable trajectory.</span>
+  <span class="k">Control</span><span>Computes steering and acceleration inputs that shrink the error between the reference path and the current state.</span>
+</div>
+
+<div class="co key"><p>Each layer is only as good as the one before it. A controller cannot track a path well if the state estimate is biased, and the estimate cannot be better than the calibration of the sensors that feed it. That is why the course starts with models and calibration.</p></div>
+
+<h2>The five building blocks, one by one</h2>
+<h3>Modeling</h3>
+<p>Express the behavior of the real system as a relation between <b>inputs</b>, <b>states</b> and <b>parameters</b>:</p>
+$$\mathbf{x}_{k+1} = f(\mathbf{x}_k, \mathbf{u}_k; \boldsymbol\theta)$$
+<p>For a car (Lecture 2): the state is position $(X, Y)$, heading $\psi$ and speed $v$; the input is the steering angle $\delta$ and acceleration $a$; the parameters are fixed properties such as mass $m$ and wheelbase $L$.
+The model predicts the next state from the current state and input. A good test of understanding: <em>a state changes because of the dynamics, an input is chosen by us, a parameter is a constant we may have to estimate.</em></p>
+
+<h3>Perception</h3>
+<p>Sensor data → <b>calibration</b> → perception. Before detections can be trusted, each sensor needs its <b>intrinsic</b> parameters (e.g. camera focal length and distortion), the <b>extrinsic</b> pose between sensors, <b>time synchronization</b> and alignment into a common coordinate frame. Only then can the outputs — objects, lanes, drivable area, relative distance and speed — be fused. Chapter 3 is entirely about this calibration step.</p>
+
+<h3>Estimation</h3>
+<p>Lecture 1 separates two kinds of estimation:</p>
+<table class="tbl">
+  <tr><th style="width:24%"></th><th>State estimation (W05–06)</th><th>Parameter estimation (W07)</th></tr>
+  <tr><td><b>Question</b></td><td>What is the current state?</td><td>What are the model parameters?</td></tr>
+  <tr><td><b>Recipe</b></td><td>Predict with the model, $\hat{x}_{k|k-1} = f(\hat{x}_{k-1|k-1}, u_{k-1}; \hat\theta)$, then update with the measurement $z_k$ to get $\hat{x}_{k|k}$</td><td>Collect inputs and measurements $\{u_k, z_k\}_{k=1}^{N}$ and solve $\hat\theta = \argmin_\theta J(\theta)$</td></tr>
+  <tr><td><b>Keywords</b></td><td>dead reckoning, KF / EKF, sensor fusion, localization, SLAM</td><td>least squares, system identification, SINDy, calibration</td></tr>
+  <tr><td><b>Output</b></td><td>$\hat{x}_{k|k}$: position $(\hat X, \hat Y)$, heading $\hat\psi$, velocity $\hat v$</td><td>$\hat\theta = [\hat m, \hat L, \hat C, \dots]$: mass, wheelbase, tire/actuator parameters</td></tr>
+</table>
+<p>The two are linked: estimated parameters update the robot model, and the model is what the state estimator uses for prediction.</p>
+<p class="small">Notation: $\hat{x}_{k|k-1}$ reads "estimate of $x$ at step $k$ using data up to step $k-1$" — the prediction. Lecture 4 writes the same thing as $\hat{x}_k^-$, and $\hat{x}_{k|k}$ as $\hat{x}_k^+$.</p>
+
+<h3>Planning</h3>
+<p>Planning decides a path and behavior from the goal and the surroundings and produces a drivable trajectory, in three stages: <b>global planning</b> (a route on a graph with edge costs: Dijkstra, A*), <b>behavior planning</b> (a finite-state machine choosing lane keep, lane change, stop/yield) and <b>local or trajectory planning</b> (Bézier curves, Frenet frame, candidate trajectories ranked by cost). The output is a reference trajectory $\mathcal{T}_{\mathrm{ref}} = \{(x_i, y_i, \psi_i, v_i)\}_{i=0}^{N}$.</p>
+
+<h3>Control</h3>
+<p>Closed-loop tracking: compare the reference with the estimated state to get the tracking errors — lateral error $e_y$ and heading error $e_\psi$ — and let the controller compute $\mathbf{u}_k = [\delta_k, a_k]^\T$. The vehicle moves, state estimation measures the new state, and the loop repeats (<b>feedback</b>). The later weeks cover Pure Pursuit, Stanley and the dynamic bicycle model (W12), then Lyapunov stability, sliding-mode control, LQR and MPC with costs and constraints (W13).</p>
+
+<h2>The 15-week plan and where these notes fit</h2>
+<table class="tbl compact split">
+  <tr><th style="width:9%">Week</th><th style="width:31%">Topic (Lecture 1, slide 10)</th><th style="width:26%">Keywords</th><th>In these notes</th></tr>
+  <tr><td>W01</td><td>Introduction</td><td>robot</td><td>Chapter 1</td></tr>
+  <tr><td>W02</td><td>Modeling (1)</td><td>kinematics</td><td>Chapter 2 (frames, robot arm)</td></tr>
+  <tr><td>W03</td><td>Modeling (2)</td><td>bicycle model</td><td>Chapter 2 (vehicle, integration)</td></tr>
+  <tr><td>W04</td><td>Sensors &amp; perception</td><td>calibration</td><td>Chapter 3</td></tr>
+  <tr><td>W05</td><td>State estimation (1)</td><td>dead reckoning</td><td>Chapter 4</td></tr>
+  <tr><td>W06</td><td>State estimation (2)</td><td>KF / EKF</td><td>Chapters 4 and 6</td></tr>
+  <tr><td>W07</td><td>Parameter estimation</td><td>least squares</td><td>Chapter 6 (pose graph), chapters 3 and 7</td></tr>
+  <tr><td><b>W08</b></td><td><b>Midterm exam</b></td><td></td><td>everything above</td></tr>
+  <tr><td>W09</td><td>Optimization</td><td>cost / constraint</td><td>Chapter 7</td></tr>
+  <tr><td>W10</td><td>Global &amp; behavior planning</td><td>Dijkstra / FSM</td><td class="muted">later in the course</td></tr>
+  <tr><td>W11</td><td>Local &amp; trajectory planning</td><td>Frenet / Bézier</td><td class="muted">later in the course</td></tr>
+  <tr><td>W12</td><td>Tracking control (1)</td><td>Pure Pursuit</td><td class="muted">later in the course</td></tr>
+  <tr><td>W13</td><td>Tracking control (2)</td><td>LQR / MPC</td><td class="muted">later in the course</td></tr>
+  <tr><td>W14</td><td>End-to-end learning</td><td>imitation / E2E</td><td class="muted">later in the course</td></tr>
+  <tr><td>W15</td><td>Final exam</td><td></td><td></td></tr>
+</table>
+
+<div class="co beyond" data-t="Threads that run through every lecture">
+<ul>
+  <li><b>Frames.</b> Every number lives in some coordinate frame. Transforms (chapter 2) reappear in calibration (extrinsics), odometry (map → odom → base_link) and pose graphs (relative poses).</li>
+  <li><b>Time.</b> A measurement is useless without its timestamp: joint angles at the wrong time (ch. 2), camera–IMU time offset (ch. 3), observation gaps in a Kalman filter (ch. 4).</li>
+  <li><b>Residual = measurement − prediction.</b> Calibration minimizes reprojection residuals, the Kalman filter corrects with the innovation, pose graphs minimize relative-pose residuals.</li>
+  <li><b>Weighting by uncertainty.</b> $\Sigma^{-1}$ in calibration, $Q$ and $R$ in the Kalman filter, $1/\sigma$ scaling in pose graphs: trust what is precise.</li>
+  <li><b>Validate on separate data.</b> A small residual on the data you fitted is not proof of accuracy (ch. 2 model validation, ch. 3 validation section).</li>
+</ul></div>
+
+<h2>Practice questions</h2>
+<div class="qa" data-type="concept" data-level="1">
+<div class="q"><p>A delivery robot has: a 2-D LiDAR, wheel encoders, an IMU, an onboard GPU computer running path planning, two drive motors and a steering servo. Sort these into sense, compute and act, and say which sensors are proprioceptive.</p></div>
+<div class="a"><p><b>Sense:</b> LiDAR, wheel encoders, IMU. <b>Compute:</b> the GPU computer and the planning software. <b>Act:</b> drive motors and steering servo.
+Proprioceptive (measure the robot itself): wheel encoders and IMU. The LiDAR is exteroceptive (measures the environment).</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="1">
+<div class="q"><p>For the car model $\mathbf{x}_{k+1} = f(\mathbf{x}_k, \mathbf{u}_k; \boldsymbol\theta)$, classify each quantity as state, input or parameter: yaw angle, steering-angle command, wheelbase, speed, acceleration command, vehicle mass, $X$-position, tire cornering stiffness.</p></div>
+<div class="a"><p><b>State:</b> yaw angle $\psi$, speed $v$, position $X$ (they evolve through the dynamics).
+<b>Input:</b> steering command $\delta$ and acceleration command $a$ (chosen by the controller).
+<b>Parameter:</b> wheelbase $L$, mass $m$, cornering stiffness $C$ (constant properties of the vehicle — the ones parameter estimation tries to identify).</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>Explain the difference between state estimation and parameter estimation, giving one example of each from this course.</p></div>
+<div class="a"><p>State estimation answers "where is the robot <em>now</em>?" — a quantity that changes every step and is estimated recursively by predicting with the model and correcting with each new measurement (e.g. the Kalman filter estimating position and velocity in Lecture 4, or the EKF estimating pose in Lecture 6).
+Parameter estimation answers "what constants describe the system?" — quantities that do not change, estimated from a whole batch of recorded data by minimizing a cost $J(\theta)$ (e.g. camera intrinsics $K$ and distortion in Lecture 3, or a wheelbase identified from driving data).
+They feed each other: better parameters give a better model for prediction.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>Why does calibration come <em>before</em> perception and state estimation in the stack? Describe what goes wrong in each later layer if the camera–LiDAR extrinsic is off by a few degrees.</p></div>
+<div class="a"><p>Every later layer assumes that sensor data are already expressed correctly in a common frame and on a common time axis; calibration is what makes that true.
+With a rotated camera–LiDAR extrinsic, LiDAR points projected into the image land beside the objects they belong to, so <b>perception</b> associates wrong depths with detections; the error grows with distance (a few degrees is tens of centimetres at 10 m).
+<b>State estimation</b> then fuses inconsistent measurements, producing a biased or jumpy pose; <b>planning</b> places obstacles in the wrong place, and <b>control</b> tracks a path that is wrong to begin with. None of the later layers can detect the problem on its own, because the error looks like a valid measurement.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>A path-tracking controller performs poorly even though the planned path is smooth and the controller gains were tuned in simulation. Using the four-layer stack, name two upstream causes worth checking and one model-related cause.</p></div>
+<div class="a"><ul>
+<li><b>State estimation:</b> a biased or delayed pose estimate (e.g. odometry drift, a wrong sensor time offset) makes the controller correct errors that do not exist.</li>
+<li><b>Perception / calibration:</b> a wrong extrinsic shifts the lane or path relative to the vehicle, so the reference itself is displaced.</li>
+<li><b>Model:</b> the controller was designed on a model whose parameters $\theta$ (wheelbase, steering response, tire behavior) do not match the real vehicle — e.g. a kinematic model used at high lateral acceleration, or a steering actuator lag ignored (both covered in Lecture 2).</li>
+</ul></div>
+</div><!--/qa-->
+</section>
