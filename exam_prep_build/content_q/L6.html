@@ -1,0 +1,59 @@
+<section class="chapter l6" id="ch-l6">
+<header class="ch-head">
+  <div class="ch-bignum">06</div>
+  <div class="ch-kicker">Lecture 6 · State estimation &amp; mapping</div>
+  <h1>EKF, UKF and pose-graph optimization</h1>
+  <p class="ch-sub">Nonlinear filtering, sigma points, and correcting a whole trajectory and its map.</p>
+</header>
+<h2>Questions</h2>
+
+<div class="qa" data-type="concept" data-level="1">
+<div class="q"><p>Why can't the standard Kalman filter be used directly for a robot measuring range and bearing to landmarks?</p></div>
+<div class="a"><p>The standard filter assumes linear motion and measurement models, which keep Gaussian beliefs Gaussian and make the update exact. Turning motion involves sines and cosines of the heading, and range and bearing involve square roots and arctangents, so both models are nonlinear. The filter needs an approximation — linearization (EKF) or sigma points (UKF) — to push a mean and covariance through them.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>The EKF uses the full nonlinear function for one thing and its Jacobian for another. Which is which, and why?</p></div>
+<div class="a"><p>The nonlinear model is used to move the mean: the predicted state and predicted measurement are computed exactly at the current estimate. The Jacobian, a local straight-line approximation, is used to move the uncertainty, because the covariance update formulas only work for linear maps. The approximation is good when the uncertainty is small compared with how strongly the function bends.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>Why must the bearing innovation always be wrapped into ±π, and what happens if you forget?</p></div>
+<div class="a"><p>Angles are periodic: a predicted bearing just under +180° and a measured one just above −180° are nearly the same direction, but their raw difference is almost a full turn. Without wrapping, the filter treats that as a huge error and applies a huge correction to the heading and position, often destroying the estimate in one step — a failure that only appears when a landmark crosses directly behind the robot.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>Why does a correct range measurement to a landmark also change the robot's estimated heading, even though range does not depend on heading?</p></div>
+<div class="a"><p>During prediction, heading errors cause sideways position errors, so the filter's covariance correlates heading with position. When a range measurement corrects position, those correlations carry part of the correction into the heading. The heading is improved indirectly — the filter infers which heading errors are consistent with where the robot really is.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>"The function of the mean is not the mean of the function." Explain this statement and why it matters for the EKF.</p></div>
+<div class="a"><p>For a curved function, averaging the outputs over all likely inputs differs from evaluating the function at the average input — the curvature pulls the average to one side. The EKF evaluates the function only at the mean, so its predicted measurement is biased whenever the uncertainty is large relative to the curvature, and its uncertainty can be over- or underestimated. This error grows with the uncertainty.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>How does the UKF avoid the EKF's linearization error? Why are sigma points not the same as random samples?</p></div>
+<div class="a"><p>The UKF picks a small set of points that exactly reproduce the current mean and covariance, sends each through the full nonlinear function, and recomputes mean and covariance from the results — so the curvature is captured without any Jacobian. The points are chosen deterministically, few in number and with fixed weights, so the result is repeatable and cheap; random sampling would need many points and would vary from run to run.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>In the lecture's tracking simulation the EKF and UKF reached almost the same accuracy. When would you expect the UKF to be clearly better?</p></div>
+<div class="a"><p>When the uncertainty is large relative to how sharply the models bend: after long periods without measurements, at initialization with a poor prior, with landmarks very close to the robot (where range and bearing change rapidly with position), or with large heading uncertainty. With frequent, accurate measurements the uncertainty stays small, linearization is already accurate, and the two filters agree.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>Why is a loop closure so valuable in pose-graph SLAM? What would optimizing a trajectory without one achieve?</p></div>
+<div class="a"><p>A loop closure is a redundant measurement: it relates poses that are far apart along the chain of odometry, so it reveals how much drift has accumulated between them. The optimizer then spreads the correction over all intermediate poses. Without loop closures, the odometry chain is consistent with itself and fits every measurement exactly, so optimization changes nothing — all drift remains.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>Why must one pose be fixed in pose-graph optimization, and why are the residuals divided by their standard deviations?</p></div>
+<div class="a"><p>All measurements are relative, so moving or rotating the whole trajectory changes nothing in the cost; without an anchor the problem has infinitely many solutions and the solver fails. Dividing by standard deviations puts residuals of different units (metres, radians) and different precision on a common scale, so precise measurements weigh more — a loop closure trusted three times more pulls three times harder per unit of error.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="3">
+<div class="q"><p>Compare how an EKF and a pose graph handle the moment the robot recognizes its starting point. What do you gain and pay with each?</p></div>
+<div class="a"><p>The EKF keeps only the current pose, so the recognition corrects the current pose, but past poses and the map built from them stay distorted. The pose graph keeps all poses as unknowns, so the correction spreads back through the whole trajectory and the map can be rebuilt from the stored raw readings. The pose graph is more accurate and repairs history, but it must store all poses and solve a growing optimization; the EKF is cheap and constant-size but cannot revise the past.</p></div>
+</div><!--/qa-->
+</section>

@@ -1,0 +1,59 @@
+<section class="chapter l4" id="ch-l4">
+<header class="ch-head">
+  <div class="ch-bignum">04</div>
+  <div class="ch-kicker">Lecture 4 · State estimation</div>
+  <h1>Wheel odometry and the Kalman filter</h1>
+  <p class="ch-sub">Frames for mobile robots, odometry drift, quaternions, and the logic of predict and correct.</p>
+</header>
+<h2>Questions</h2>
+
+<div class="qa" data-type="concept" data-level="1">
+<div class="q"><p>Why does wheel odometry drift without bound, even with a perfect encoder?</p></div>
+<div class="a"><p>Odometry integrates small increments of travel and rotation, so every error — wheel radius slightly off, slip, uneven floor, a slightly wrong wheel separation — is added up and never removed. Heading errors are especially harmful because they rotate all subsequent motion, turning into position errors that grow with distance. Nothing in odometry itself refers to the outside world, so nothing can pull the estimate back.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>Why does ROS keep both <code>odom</code> and <code>map</code> frames instead of a single world frame?</p></div>
+<div class="a"><p>They serve different needs. The robot's pose in odom is continuous and smooth but drifts; its pose in map is globally correct but may jump whenever localization corrects it. Local tasks like obstacle avoidance want smoothness, global navigation wants correctness. The localizer corrects the robot by publishing the map→odom transform, so odometry can keep running undisturbed.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>After a localization correction, the robot's current pose is right but its stored path still looks distorted. Why?</p></div>
+<div class="a"><p>The map→odom correction is one rigid transform applied to all odom data. The path's distortion came from errors that accumulated gradually at different times, so different parts of the path need different corrections. A single transform can fix where the robot is now, but correcting each past pose separately requires optimizing the whole trajectory, as in a pose graph.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="1">
+<div class="q"><p>A wheel spins on ice and the robot does not move. What does odometry report, and what kind of sensor could reveal the problem?</p></div>
+<div class="a"><p>The encoder counts wheel rotation, so odometry reports that the robot moved forward — confidently and wrongly. Only an independent measurement of motion can expose it: an IMU sensing no acceleration, visual or LiDAR odometry seeing a static scene, or an absolute position fix. This is why odometry is fused with other sensors instead of trusted alone.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>Why is robot orientation commonly stored as a quaternion instead of three angles, and what is the most common practical mistake with them?</p></div>
+<div class="a"><p>A unit quaternion represents any 3-D rotation without the singularities of Euler angles, composes and interpolates smoothly, and needs only a normalization to stay valid. The usual mistakes: forgetting that it encodes <em>half</em> the rotation angle, using degrees instead of radians, and mixing up the component order (ROS uses x, y, z, w; some libraries put w first).</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>Describe in words what the prediction and correction steps of a Kalman filter do to the estimate and to its uncertainty.</p></div>
+<div class="a"><p>Prediction moves the estimate according to the motion model and <em>increases</em> the uncertainty, because the model is imperfect and the process noise adds doubt. Correction compares the prediction with a new measurement and moves the estimate toward it by an amount set by their relative trust; the uncertainty <em>decreases</em>, because two independent sources of information together say more than either alone.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>Predict how the filter behaves if you increase R, the measurement noise you tell it. And if you increase Q, the process noise?</p></div>
+<div class="a"><p>A larger R makes the filter distrust measurements: the gain falls, estimates follow the prediction more, and they become smoother but slower to react. A larger Q makes it distrust its own model: the predicted uncertainty grows, the gain rises, and estimates follow measurements more closely — more responsive but noisier. Q and R are tuning choices that should reflect reality; mis-setting them makes the filter either sluggish or jumpy.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>Why is the corrected uncertainty always at least as small as the smaller of the prediction uncertainty and the measurement uncertainty?</p></div>
+<div class="a"><p>Combining two independent, unbiased estimates with the optimal weights can never be worse than using the better one alone — at worst you could put all the weight on it. Each source adds information; in effect the precisions (inverse variances) add. So fusion always helps, provided the stated uncertainties are honest and the errors are really independent.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="3">
+<div class="q"><p>The filter estimates position and velocity, but only position is measured. How can a position measurement correct the velocity?</p></div>
+<div class="a"><p>The constant-velocity model predicts position from velocity, so a velocity error turns into a growing position error; the prediction step records this link as a correlation (cross-covariance) between the two errors. When a measurement shows the robot ahead of the prediction, the correlation tells the filter it was probably moving faster than estimated, so it raises the velocity too. Without that correlation — for example right at the start, before any prediction — a position measurement would leave velocity unchanged.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="3">
+<div class="q"><p>A GNSS sensor with a constant offset feeds a Kalman filter. The filter's reported uncertainty shrinks steadily, yet the robot is consistently wrong. Explain, and say what would actually fix it.</p></div>
+<div class="a"><p>The covariance only describes errors the model knows about — zero-mean, uncorrelated noise. A constant bias is not in the model, so each consistent measurement makes the filter more confident while the bias passes straight into the estimate. Adding the bias to the state does not help by itself, because position and bias cannot be separated from that one measurement. The fix is information that separates them: an independent measurement of position (another sensor or a known landmark) or calibrating the offset beforehand.</p></div>
+</div><!--/qa-->
+</section>

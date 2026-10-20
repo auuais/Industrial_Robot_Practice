@@ -1,0 +1,59 @@
+<section class="chapter l2" id="ch-l2">
+<header class="ch-head">
+  <div class="ch-bignum">02</div>
+  <div class="ch-kicker">Lecture 2 · Modeling</div>
+  <h1>System modeling and motion analysis</h1>
+  <p class="ch-sub">Frames and transforms, arm and vehicle kinematics, and stepping a model forward in time.</p>
+</header>
+<h2>Questions</h2>
+
+<div class="qa" data-type="concept" data-level="1">
+<div class="q"><p>Why is a measurement useless without its unit, coordinate frame and timestamp?</p></div>
+<div class="a"><p>A number alone does not say what it means. Without the unit you cannot tell millimetres from metres; without the frame you do not know which origin and axes the position or velocity refers to, so you cannot transform it into anything else; without the timestamp you cannot combine it with other data (for example, the robot's pose at that moment), because the robot keeps moving. Each missing piece silently produces a wrong result rather than an obvious error.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>Why are the columns of a rotation matrix the axes of the rotated frame? Why does that make its inverse simply its transpose?</p></div>
+<div class="a"><p>Multiplying the matrix by the unit vector along B's x-axis (written in B) picks out the first column, so that column must be B's x-axis written in the other frame — and likewise for the other columns. Those axes are unit length and mutually perpendicular, so multiplying the transpose by the matrix produces their dot products: one on the diagonal, zero elsewhere. That is the identity, so the transpose undoes the rotation without any real inversion.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>When you change frames, why does a point's position get rotated <em>and</em> translated, while a velocity or displacement is only rotated?</p></div>
+<div class="a"><p>A position is a location measured from an origin, so moving the origin changes it. A displacement or velocity is the difference between two locations; both shift by the same amount, so the shift cancels and only the direction (the rotation) matters. Homogeneous coordinates encode this neatly: positions carry a 1 that picks up the translation, free vectors carry a 0 that ignores it.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>When inverting a transform, a common mistake is to negate the translation and transpose the rotation separately. Why is that wrong in general?</p></div>
+<div class="a"><p>The translation vector of a transform is written in the <em>destination</em> frame. The inverse needs the opposite offset as seen from the other frame, so the negated vector must also be rotated into that frame. Simply negating it gives the right answer only when the two frames are not rotated relative to each other.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>A camera on a robot arm detects an object while the arm is moving. Explain why using joint angles from slightly before the image was taken produces an error, and what makes the error larger.</p></div>
+<div class="a"><p>The transform from the camera to the base depends on the joint angles; stale angles describe a slightly different arm pose, so the object is placed where it would be for that other pose. The error grows with how fast the joints move, how long the time mismatch is, and how far the camera and object are from the moving joints (a longer lever arm turns a small angle error into a large position error). When the arm is still, the same mismatch causes no error at all.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>What physical assumption makes the bicycle model "kinematic", and why does it lead to an instantaneous center of rotation?</p></div>
+<div class="a"><p>It assumes the wheels do not slip sideways: each wheel's velocity points along the direction the wheel faces. In a turn, all points of a rigid body move on circles about one common point; the perpendiculars to the rear and front wheels must both pass through it, so their intersection is the instantaneous center of rotation. The model therefore needs only geometry (wheelbase, steering angle), not forces or tire properties.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>Why does the vehicle's center of gravity move in a slightly different direction from where the body points, while the rear axle center moves straight ahead?</p></div>
+<div class="a"><p>The rear axle has no sideways velocity by the no-slip assumption. The center of gravity lies ahead of it on a rotating body, so the yaw rotation adds a sideways velocity proportional to its distance from the rear axle. Its velocity is therefore tilted toward the inside of the turn by the slip angle β. This matters when comparing models or measurements that refer to different points on the car.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="3">
+<div class="q"><p>Why does the forward Euler method consistently end up <em>outside</em> the true circle when simulating a car driving in a circle, and why does the midpoint method do much better?</p></div>
+<div class="a"><p>Euler uses the heading at the start of the step for the whole step, while the real car keeps turning during it. Each step therefore goes too straight, and the car drifts outward step after step — a systematic error, not random. The midpoint method first estimates where the car will be halfway through the step and uses the heading there, which averages the turning within the step and cancels most of that bias.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>What does it mean that a method has a higher "order of convergence", and why is RK4 often cheaper overall despite needing four evaluations per step?</p></div>
+<div class="a"><p>The order describes how fast the error shrinks as the step size shrinks: the higher the order, the more a smaller step pays off. A high-order method reaches a given accuracy with far larger steps, so even with more work per step it needs far fewer steps in total. For smooth problems that trade-off strongly favors RK4; low-order methods only win when each evaluation is very expensive or the solution is not smooth.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="3">
+<div class="q"><p>A simulation of a fast steering actuator blows up even though the vehicle motion itself is slow. Explain why, and why "it didn't blow up" is still not proof that the result is right.</p></div>
+<div class="a"><p>Explicit methods such as Euler are only stable when the step is small compared with the system's <em>fastest</em> time constant. A quick actuator is a fast dynamic, so a step that is fine for the slow car motion overshoots the actuator's response more each step and the error grows instead of shrinking. Being stable only means the error does not grow without bound; with a step close to the limit the solution can still oscillate or overshoot where the real system responds smoothly, so it must be checked against a smaller step or an analytical solution.</p></div>
+</div><!--/qa-->
+</section>

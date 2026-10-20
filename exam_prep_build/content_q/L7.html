@@ -1,0 +1,59 @@
+<section class="chapter l7" id="ch-l7">
+<header class="ch-head">
+  <div class="ch-bignum">07</div>
+  <div class="ch-kicker">Lecture 7 · Optimization</div>
+  <h1>Optimization</h1>
+  <p class="ch-sub">Directions and steps, curvature, least squares, damping, constraints and multipliers.</p>
+</header>
+<h2>Questions</h2>
+
+<div class="qa" data-type="concept" data-level="1">
+<div class="q"><p>Every iterative optimizer chooses a direction and a step size. Why are these treated as separate decisions?</p></div>
+<div class="a"><p>The direction is based on a local model of the function, which is only trustworthy near the current point. Even a good direction can overshoot if followed too far, so a separate check of the <em>actual</em> function decides how far to go. Separating them lets cheap or approximate directions be used safely, with the step-size logic guaranteeing real progress.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>Why is a zero gradient not enough to declare a minimum? What extra information settles it?</p></div>
+<div class="a"><p>A zero gradient only says the function is flat to first order, which also happens at maxima and saddle points. The curvature, described by the Hessian, decides: curving upward in every direction means a minimum; downward in every direction a maximum; up in some and down in others a saddle. If the curvature is zero in some direction, higher-order behavior must decide.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>Why is convexity such a valuable property, and why do robotics problems like pose graphs usually lack it?</p></div>
+<div class="a"><p>In a convex problem every local minimum is the global one, so any method that converges finds the true answer regardless of the starting point. Problems involving orientations (rotations, headings) contain sines and cosines that create several valleys, so solvers can get stuck in a wrong local minimum. That is why such problems are always started from a good initial guess, such as odometry or a linear estimate.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>Explain why gradient descent zigzags in a long, narrow valley, and why Newton's method does not.</p></div>
+<div class="a"><p>The gradient points down the steepest local slope, which in a narrow valley is mostly across it, not along it. Each step crosses the valley, the next gradient points back, and progress along the valley floor is slow. Newton's method uses the curvature to rescale directions — taking big steps where the function is flat and small ones where it is steep — so it heads toward the bottom of the valley directly.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>Pure Newton's method can converge to a maximum. How is that possible, and how do practical methods prevent it?</p></div>
+<div class="a"><p>Newton's method looks for a point where the gradient is zero, using the local quadratic model. If the curvature is negative, the model's stationary point is a maximum and the step heads toward it, possibly uphill. Practical methods check that the direction actually descends, replace the Hessian with a positive-definite substitute when needed, and accept only steps that genuinely reduce the function.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>What does Gauss–Newton approximate, and when does it work well or poorly?</p></div>
+<div class="a"><p>For least-squares problems it approximates curvature using only first derivatives of the residuals, dropping the terms that involve the residuals' own curvature weighted by the residual size. It works very well when the model fits the data well (small residuals at the solution) or when residuals are nearly linear; it can take poor or huge steps when residuals stay large and curved, or when the problem is poorly constrained.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>How does Levenberg–Marquardt blend gradient descent and Gauss–Newton, and how does it decide which way to lean?</p></div>
+<div class="a"><p>A damping term penalizes large steps. With little damping the step is the fast Gauss–Newton step; with heavy damping it becomes a short, safe gradient-descent step. After each trial step LM compares the actual decrease with the decrease the model predicted: good agreement means the model is trustworthy, so the damping is reduced; poor agreement or an increase means the step is rejected and the damping is raised. It is fast near the solution and safe far from it.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>Why is the objective gradient perpendicular to an equality constraint at a constrained minimum? What does the Lagrange multiplier mean?</p></div>
+<div class="a"><p>If the gradient had any component along the constraint, moving along the constraint one way would lower the objective while staying feasible, so the point would not be a minimum. At the optimum, all of the gradient must point across the constraint, parallel to the constraint's own gradient. The multiplier is the proportionality factor; it also measures how sensitive the optimal cost is to relaxing the constraint — how much it is "pushing" on the solution.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>Give the intuition behind complementarity: why must an inequality multiplier be zero when the constraint is not active?</p></div>
+<div class="a"><p>An inactive constraint has slack — the solution is not touching that boundary — so removing it would not change the answer; it exerts no force and its multiplier must be zero. A constraint can only push (multiplier positive) when the solution is pressed against it. Complementarity encodes exactly this: either the constraint holds with slack, or its multiplier may be nonzero, never both.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="3">
+<div class="q"><p>Why does SQP need a merit function, and why is a tiny step not proof that an optimizer has succeeded?</p></div>
+<div class="a"><p>With constraints, a step can lower the objective while increasing violation, so neither alone measures progress; a merit function combines objective and constraint violation into one quantity the line search can test. A tiny step may also come from stalling — over-damping, a stuck line search, bad scaling, or being blocked by constraints. Success must be checked directly with the optimality conditions: small gradient of the Lagrangian, feasibility, correct multiplier signs, complementarity — and, for nonconvex problems, even then only a local minimum is guaranteed.</p></div>
+</div><!--/qa-->
+</section>

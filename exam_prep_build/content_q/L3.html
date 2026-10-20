@@ -1,0 +1,59 @@
+<section class="chapter l3" id="ch-l3">
+<header class="ch-head">
+  <div class="ch-bignum">03</div>
+  <div class="ch-kicker">Lecture 3 · Sensors &amp; perception</div>
+  <h1>Sensor calibration</h1>
+  <p class="ch-sub">Intrinsics and distortion, stereo geometry, camera–LiDAR and camera–IMU calibration, and validation.</p>
+</header>
+<h2>Questions</h2>
+
+<div class="qa" data-type="concept" data-level="1">
+<div class="q"><p>What is the difference between intrinsic and extrinsic calibration? Give a real event that invalidates each.</p></div>
+<div class="a"><p>Intrinsics describe how one camera maps rays to pixels — focal length, principal point, lens distortion — and belong to the camera–lens unit; changing zoom, focus or image resolution invalidates them. Extrinsics describe where a sensor sits relative to another sensor or the robot body; remounting the camera, or a bracket bending in a collision, invalidates them while leaving the intrinsics untouched.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>Why can't a single camera measure the distance to a point, and what does this imply for calibration?</p></div>
+<div class="a"><p>Projection divides by depth: every point along the same viewing ray lands on the same pixel, so depth information is lost. Images therefore cannot reveal absolute scale — a scene twice as large, seen from twice as far, looks identical. Calibration must take scale from something known, such as a target of known square size or another sensor, and a wrong target size produces wrongly scaled results while the reprojection error still looks perfect.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>Why does good intrinsic calibration need images with the board tilted and near the image edges, not just many images facing the camera?</p></div>
+<div class="a"><p>A board facing the camera squarely gives almost the same geometric information in every image, so changing the focal length can be compensated by changing the board's distance, and the parameters become poorly determined however many images you take. Tilted views break that trade-off because perspective foreshortening depends on focal length. Distortion is strongest near the edges, so those regions must be observed for the distortion model to be estimated rather than guessed.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>Why does Zhang's method first estimate the parameters linearly and only then run a nonlinear optimization?</p></div>
+<div class="a"><p>The true cost — reprojection error including lens distortion — is nonlinear and has local minima, so an iterative optimizer needs a starting point close to the answer. The linear step ignores distortion and noise statistics but gives a closed-form, reasonable guess quickly. The nonlinear refinement then improves that guess to the statistically correct answer. The same "initialize simply, refine properly" pattern appears in camera–LiDAR calibration and pose graphs.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>What does epipolar geometry give you in practice when matching points between two cameras?</p></div>
+<div class="a"><p>A point in one image fixes a ray in space; whatever its depth, its image in the second camera must lie on one specific line, the epipolar line. Matching therefore becomes a search along a line instead of over the whole image, which is faster and rejects many false matches. Rectification goes one step further by making these lines horizontal rows, so matching is a search along the same row.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>Why does stereo depth become much less accurate for distant objects, and what design choices improve long-range accuracy?</p></div>
+<div class="a"><p>Distance is inferred from disparity, the shift of a point between the two images. Far objects have small disparities, so a fixed matching error of a fraction of a pixel is a large fraction of the disparity and causes a large depth error, growing roughly with the square of the distance. A wider baseline or longer focal length increases the disparity at a given distance, and better sub-pixel matching reduces the disparity error.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>In camera–LiDAR calibration with planar targets, why must the target be shown at several different orientations?</p></div>
+<div class="a"><p>A plane only constrains how far the sensor is along its normal direction; sliding sideways along the plane changes nothing measurable. If every capture uses the same orientation, translation in the in-plane directions (and some rotation) cannot be determined. Normals pointing in at least three independent directions are needed so that every direction of translation and rotation is constrained.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>A LiDAR overlay matches the image perfectly while the robot is parked but drifts whenever it turns. What is the likely cause, and why does it only appear during motion?</p></div>
+<div class="a"><p>A timing problem: a time offset between the sensors, rolling-shutter row timing, or LiDAR points collected at different moments during a scan without motion compensation. A time error only matters when the pose changes during that time — while parked the pose at both moments is the same — and rotation makes it worst because heading errors swing distant points sideways. A purely geometric extrinsic error would be visible at rest too.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="3">
+<div class="q"><p>Why does camera–IMU calibration require "exciting" motion — rotations about all axes and varying accelerations — rather than smooth, steady movement?</p></div>
+<div class="a"><p>With steady motion, different parameter combinations explain the data equally well: a time offset can be traded for a position offset, and a rotation about an unexcited axis is unconstrained. The parameters are then not observable individually and the estimate is driven by noise. Varying motion makes each parameter leave a distinct signature in the data, so the combinations can be separated.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="3">
+<div class="q"><p>Explain why a low residual, good accuracy and good repeatability are three different claims. How do you obtain trustworthy evidence of a correct calibration?</p></div>
+<div class="a"><p>The residual only says the model fits the data it was fitted to, and can hide model error or a consistent bias (such as a wrong target size). Repeatability says repeated runs agree, but they can all agree on a wrong answer. Accuracy — closeness to the truth — needs an independent, trusted reference. Good evidence comes from validating on separate data not used in the fit, with calibration parameters held fixed, and ideally against known lengths or distances.</p></div>
+</div><!--/qa-->
+</section>

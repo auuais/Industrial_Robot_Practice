@@ -1,0 +1,59 @@
+<section class="chapter l1" id="ch-l1">
+<header class="ch-head">
+  <div class="ch-bignum">01</div>
+  <div class="ch-kicker">Lecture 1 · Introduction</div>
+  <h1>Course map: what an intelligent robot does</h1>
+  <p class="ch-sub">Sense–compute–act, the four software layers, and how modeling, estimation and optimization connect.</p>
+</header>
+<h2>Questions</h2>
+
+<div class="qa" data-type="concept" data-level="1">
+<div class="q"><p>Why is a robot described as a <em>loop</em> of sense, compute and act rather than a one-way pipeline?</p></div>
+<div class="a"><p>Every action changes the robot's state and its surroundings, which changes what it senses next; the next decision depends on that new information. Closing the loop is what lets a robot correct its own mistakes and react to disturbances. A one-way pipeline (plan once, execute blindly) cannot notice that a wheel slipped or an obstacle moved.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="1">
+<div class="q"><p>What is the difference between exteroceptive and proprioceptive sensors, and why does a robot usually need both?</p></div>
+<div class="a"><p>Proprioceptive sensors (wheel encoders, IMU, joint encoders) measure the robot itself: smooth, high-rate, always available, but their errors accumulate because they only measure change. Exteroceptive sensors (camera, LiDAR, GNSS) measure the world: they give absolute references but are slower, noisier, and can drop out. Together they cover each other's weakness — proprioception for smooth short-term motion, exteroception to stop long-term drift.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>How do you decide whether a quantity is a state, an input or a parameter? Use a car's mass, speed and steering command as examples.</p></div>
+<div class="a"><p>Ask who changes it and how fast. A <b>state</b> evolves through the system's own dynamics and must be tracked over time (speed). An <b>input</b> is chosen from outside, usually by the controller (steering command). A <b>parameter</b> is a property of the system that is constant, or changes so slowly it is treated as constant (mass). The same physical quantity can move category depending on the model — a car's mass becomes a state if you model fuel burn or a changing payload.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>Explain why the layers of the stack (perception → estimation → planning → control) depend on each other in order. What is the consequence for debugging?</p></div>
+<div class="a"><p>Each layer consumes the output of the one before: a planner plans from the estimated state, a controller tracks the planned path from the estimated state. An error upstream propagates downstream and often <em>looks</em> like a downstream fault — a jittery steering wheel may really be a jumpy pose estimate. So debugging should start upstream: verify calibration and estimation before retuning the controller.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>State estimation and parameter estimation both "estimate from data". What fundamentally distinguishes them?</p></div>
+<div class="a"><p>State estimation tracks something that changes every moment, so it runs recursively — predict with the model, correct with each new measurement — and keeps an up-to-date belief. Parameter estimation identifies constants, so it can use a whole batch of recorded data at once and solve one optimization problem. They feed each other: parameters make the model that the state estimator predicts with, and good state estimates are the data for identifying parameters.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>Why is calibration treated as a prerequisite of perception rather than part of it?</p></div>
+<div class="a"><p>Perception algorithms assume their inputs are already geometrically correct: pixels mapped through the right lens model, sensors expressed in a common frame, and data aligned in time. Calibration is what makes those assumptions true. If it is wrong, every downstream result is consistently wrong, and nothing in the perception algorithm can detect it, because the bad data still looks like valid data.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="1">
+<div class="q"><p>What does a controller need from state estimation, and what goes wrong if the estimate is delayed?</p></div>
+<div class="a"><p>The controller compares the reference path with the robot's current state (position, heading, speed) to compute tracking errors. A delayed estimate describes where the robot <em>was</em>, so the controller reacts late to errors it should already have corrected; at speed this causes overshoot and oscillation, much like driving while looking at a video with a lag.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>Planning is split into global, behavior and local/trajectory planning. Why not plan everything in one step?</p></div>
+<div class="a"><p>The levels work on different scales of space and time. A global route over a road network changes rarely and can be planned slowly; behavior decisions (keep lane, change lane, yield) react to traffic every few seconds; a local trajectory must respect vehicle dynamics and nearby obstacles and is recomputed many times per second. Splitting keeps each problem small enough to solve at the rate it needs.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>The lecture says manipulators, quadrupeds and cars follow the same engineering approach. What is that common approach, and what changes between platforms?</p></div>
+<div class="a"><p>The approach is: model the system, estimate its state, then generate an action — with sensing and feedback closing the loop. What changes is the content of each step: the kinematic model (joint chain vs. wheels vs. legs), the sensors used, the constraints (joint limits, no lateral slip, contact forces) and the control objective. The same estimation and optimization tools apply to all of them.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="3">
+<div class="q"><p>Why does optimization appear "underneath" so many parts of the course instead of being one isolated topic?</p></div>
+<div class="a"><p>Many robotics tasks are naturally stated as "find the values that best explain the data, or best achieve the goal, subject to limits". Calibration finds parameters that best explain images, pose-graph SLAM finds the trajectory that best agrees with all measurements, the Kalman gain is chosen to minimize error variance, and MPC chooses inputs that best track a path within actuator limits. Once a problem is written as a cost plus constraints, the same solvers work for all of them.</p></div>
+</div><!--/qa-->
+</section>
