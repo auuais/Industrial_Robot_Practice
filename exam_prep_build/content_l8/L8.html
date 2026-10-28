@@ -1,0 +1,504 @@
+<section class="chapter l8" id="ch-l8">
+<header class="ch-head">
+  <div class="ch-bignum">08</div>
+  <div class="ch-kicker">Lecture 8 · Global planning</div>
+  <h1>Global path planning and route execution</h1>
+  <p class="ch-sub">How a robot finds the cheapest route through a map, keeps it right when time is short, when the map changes or when the robot moves, scales the search to huge maps, and decides when to follow, hold or replan.</p>
+</header>
+<div class="glance">
+  <div><div class="gh">After this chapter you can</div><ul>
+    <li>model a map as a weighted graph and state the shortest-path problem</li>
+    <li>run <b>Dijkstra</b> and <b>A*</b> by hand with an OPEN/CLOSED table</li>
+    <li>test a heuristic for <b>admissibility</b> and <b>consistency</b> and say what each guarantees</li>
+    <li>explain the speed/quality trade-off of <b>Weighted A*</b> and how <b>ARA*</b> improves a path over time</li>
+    <li>repair costs with <b>LPA*</b> (g vs rhs) and <b>D* Lite</b> (cost-to-go, key modifier)</li>
+    <li>explain how <b>HPA*</b> and <b>Contraction Hierarchies</b> speed up huge maps, and what they cost</li>
+    <li>write FSM guards with a priority order and add <b>hysteresis</b> to route switching</li>
+  </ul></div>
+  <div><div class="gh">Slide map</div><ul class="slidemap">
+    <li><span>Shortest-path problem, relaxation</span><span class="sl">s1–2</span></li>
+    <li><span>Dijkstra and its pseudocode</span><span class="sl">s3–4</span></li>
+    <li><span>A*, heuristics, pseudocode</span><span class="sl">s5–7</span></li>
+    <li><span>Weighted A*, reuse, ARA*</span><span class="sl">s8–10</span></li>
+    <li><span>Graph changes, LPA*</span><span class="sl">s11–13</span></li>
+    <li><span>D* Lite and the key modifier</span><span class="sl">s14–16</span></li>
+    <li><span>HPA*, Contraction Hierarchies</span><span class="sl">s17–20</span></li>
+    <li><span>FSM, guards, hysteresis</span><span class="sl">s21–23</span></li>
+  </ul></div>
+</div>
+
+<h2>The big picture</h2>
+<div class="co intuition" data-t="In plain English"><p>A global planner is the robot's navigation app. You give it a map, where the robot is and where it must go; it returns the cheapest route. "Cheapest" can mean shortest, fastest, safest or least energy — whatever cost you attach to each move. The rest of the lecture answers the practical follow-up questions: how to search faster, what to do when there isn't time to find the very best route, what to do when the map changes or the robot has already moved, how to cope with enormous maps, and who decides when to drive on, wait or replan.</p></div>
+<p>In the course stack of Lecture 1, global planning sits between state estimation and control. It takes the estimated position and the map and hands a route to the local planner (next week), which turns it into a smooth, drivable trajectory for the controller.</p>
+<figure class="fig"><div class="panel"><img src="fig/l8_family.svg" alt=""></div>
+<figcaption>The five questions of the lecture and the methods that answer them. Almost everything is a variation of one idea: relax edges, in a clever order.</figcaption></figure>
+
+<h2>Graphs and the shortest-path problem</h2>
+<div class="co intuition" data-t="In plain English"><p>Turn the map into dots and arrows. A dot (<b>node</b>) is a place or state the robot can be in — a grid cell, a road intersection, a parking spot. An arrow (<b>edge</b>) is a move that is allowed from one node to another, and its number (<b>cost</b>) is what that move costs. A route is a chain of arrows from start to goal; its cost is the sum of the arrow costs. The planner looks for the chain with the smallest sum.</p></div>
+$$\mathcal{G} = (V, E), \qquad c(u,v) \ge 0, \qquad P = (v_0 = S, \dots, v_k = G), \qquad J(P) = \sum_{i=0}^{k-1} c(v_i, v_{i+1})$$
+<p>$V$ is the set of states (nodes), $E$ the set of allowed moves (edges), $S$ the start, $G$ the goal and $k$ the number of edges in the path. Goal: find the path $P$ that minimizes $J(P)$. Edges have a direction (a one-way street is an edge in one direction only), and every cost in this lecture is non-negative.</p>
+<figure class="fig"><div class="panel"><img src="fig/l8_graph.svg" alt="" style="max-width:60%"></div>
+<figcaption>The example graph used on almost every slide (slide 1). The cheapest route S→A→B→C→G (teal) costs 2 + 1 + 2 + 3 = 8.</figcaption></figure>
+<div class="co example" data-t="Worked example · list every route (slide 1 graph)">
+<p>This graph is small enough to list all six S→G routes:</p>
+<table class="tbl compact">
+<tr><th>Route</th><th class="num">Cost</th><th>Route</th><th class="num">Cost</th></tr>
+<tr><td>S–A–B–C–G</td><td class="num"><b>2 + 1 + 2 + 3 = 8</b></td><td>S–A–C–G</td><td class="num">2 + 5 + 3 = 10</td></tr>
+<tr><td>S–A–B–E–G</td><td class="num">2 + 1 + 1 + 6 = 10</td><td>S–B–C–G</td><td class="num">6 + 2 + 3 = 11</td></tr>
+<tr><td>S–B–E–G</td><td class="num">6 + 1 + 6 = 13</td><td>S–D–E–G</td><td class="num">1 + 10 + 6 = 17</td></tr>
+</table>
+<p>Listing routes works here, but the number of routes explodes with map size: a 20 × 20 grid already has about 1.4 × 10<sup>11</sup> shortest-length corner-to-corner routes. The algorithms below never list routes — they build the cheapest cost to each node one step at a time.</p>
+</div>
+<div class="co key"><p><b>Every part of a shortest path is itself a shortest path.</b> If S→A→B→C→G is cheapest to G, then S→A→B must be the cheapest way to B — otherwise you could swap in the cheaper piece and beat the "cheapest" route. That is why shortest costs can be built node by node and reused.</p></div>
+
+<h2>Relaxation: the one update everything uses</h2>
+<div class="co intuition" data-t="In plain English"><p>For every node, keep a running record: "the cheapest way I have found to get here so far" ($g$) and "which node I came from" (parent). Relaxing an edge u→v asks one question: <em>would arriving at v through u beat the record?</em> If yes, overwrite the record. Dijkstra, A*, ARA*, LPA* and D* Lite are all just different orders in which to ask this question.</p></div>
+$$g(u) + c(u,v) < g(v) \;\Rightarrow\; g(v) \leftarrow g(u) + c(u,v), \qquad \mathrm{parent}(v) \leftarrow u$$
+<ul>
+<li>$g(v)$: lowest cost of an S→v path found so far — the value being updated. It starts at ∞ for every node except $g(S) = 0$.</li>
+<li>$c(u,v)$: the given edge cost.</li>
+<li>parent records the path; it never deletes an edge from the graph. Following parents back from G and reversing gives the route.</li>
+</ul>
+<div class="co example" data-t="Worked example · slide 2">
+<p>A path to $v$ was found earlier with $g(v) = 10$. Now $u$ has been reached with $g(u) = 4$, and the edge u→v costs 3.</p>
+<ol class="steps">
+<li><b>Compare:</b> $4 + 3 = 7 < 10$ — the route through $u$ is cheaper.</li>
+<li><b>Update the cost:</b> $g(v): 10 \to 7$.</li>
+<li><b>Record the parent:</b> $\mathrm{parent}(v) \leftarrow u$. (Had the sum been 12, nothing would change.)</li>
+</ol>
+</div>
+<div class="co pitfall"><p>Relaxation only ever <em>lowers</em> $g$. A finite $g(v)$ is always the cost of a real path that exists, so it is an upper bound on the true shortest cost. The question every algorithm must answer is: <em>when can we be sure that $g(v)$ will not go any lower?</em></p></div>
+
+<h2>Dijkstra's algorithm</h2>
+<div class="co intuition" data-t="In plain English"><p>Imagine pouring water in at S and letting it flow through pipes whose lengths are the edge costs. The water reaches the nodes in order of their distance from S. Dijkstra simulates this: it always takes the <b>nearest node that is not finished yet</b>, declares its cost final, and relaxes its outgoing edges. Because no cost is negative, any other way into that node would have to pass through something even farther away — so nothing can beat it later.</p></div>
+<p>Two sets keep the bookkeeping:</p>
+<ul>
+<li><b>OPEN</b> — nodes discovered but not final yet: a priority queue ordered by $g$. EXTRACT_MIN pops the smallest key; INSERT_OR_UPDATE inserts a node or lowers its key; PATH traces the parents back.</li>
+<li><b>CLOSED</b> — nodes already expanded; their $g$ is final.</li>
+</ul>
+$$u \in \argmin_{v \in \mathrm{OPEN}} g(v)$$
+<p>With all edge costs ≥ 0, the node with the smallest $g$ in OPEN has its final shortest cost: every other unfinished node already has a $g$ at least as large, and continuing through it only adds non-negative costs.</p>
+<div class="co formula" data-t="Pseudocode (slide 4), line by line">
+<table class="tbl compact">
+<tr><th style="width:23%">Lines</th><th>What happens</th></tr>
+<tr><td>01–03 initialize</td><td>every $g = \infty$ and parent = NIL; $g(S) = 0$; S goes into OPEN; CLOSED is empty</td></tr>
+<tr><td>04–06 select / stop</td><td>while OPEN is not empty, pop the node $u$ with the smallest key; if $u = G$, return the path by tracing parents</td></tr>
+<tr><td>07</td><td>move $u$ to CLOSED — its $g$ is now final</td></tr>
+<tr><td>08–13 check neighbors</td><td>for every edge $u \to v$ with $v$ not in CLOSED: tentative = $g(u) + c(u,v)$; if it beats $g(v)$, update $g(v)$ and parent($v$)</td></tr>
+<tr><td>14 update OPEN</td><td>insert $v$ into OPEN, or lower its key to the new $g(v)$</td></tr>
+<tr><td>15</td><td>OPEN ran empty before G was reached: no path exists — return FAILURE</td></tr>
+</table>
+<p class="small">Requirements: a finite graph and non-negative edge costs.</p>
+</div>
+<div class="co example split" data-t="Worked example · full Dijkstra trace on the slide graph (slides 3–4)">
+<table class="tbl compact">
+<tr><th style="width:7%">Step</th><th style="width:13%">Pop (g)</th><th>Relaxations</th><th style="width:24%">OPEN afterwards</th></tr>
+<tr><td>1</td><td>S (0)</td><td>A: 0 + 2 = 2 · B: 0 + 6 = 6 · D: 0 + 1 = 1</td><td>D:1, A:2, B:6</td></tr>
+<tr><td>2</td><td>D (1)</td><td>E: 1 + 10 = 11 &nbsp;(slide 4: $g(E) \leftarrow \min\{\infty, 1 + 10\} = 11$)</td><td>A:2, B:6, E:11</td></tr>
+<tr><td>3</td><td>A (2)</td><td>B: 2 + 1 = 3 &lt; 6 → improved · C: 2 + 5 = 7</td><td>B:3, C:7, E:11</td></tr>
+<tr><td>4</td><td>B (3)</td><td>C: 3 + 2 = 5 &lt; 7 → improved · E: 3 + 1 = 4 &lt; 11 → improved</td><td>E:4, C:5</td></tr>
+<tr><td>5</td><td>E (4)</td><td>G: 4 + 6 = 10 — <b>goal discovered, but not final</b></td><td>C:5, G:10</td></tr>
+<tr><td>6</td><td>C (5)</td><td>G: 5 + 3 = 8 &lt; 10 → improved</td><td>G:8</td></tr>
+<tr><td>7</td><td>G (8)</td><td>goal popped → stop</td><td>—</td></tr>
+</table>
+<p>Tracing parents from G: G ← C ← B ← A ← S, i.e. <b>S→A→B→C→G with cost 8</b>. Right after S, Dijkstra picks D (g = 1) — the closest node, even though D leads away from the goal (slide 3).</p>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l8_dijkstra.svg" alt=""></div>
+<figcaption>Four snapshots of the trace. Blue edges are the current parent links — they always form a tree rooted at S. In the last panel the tree contains the final route (teal).</figcaption></figure>
+<div class="co pitfall" data-t="Watch out · stop when the goal is popped, not when it is found"><p>At step 5 the goal is <em>discovered</em> with cost 10, but a cheaper route (8) is still hidden behind C. Stopping at discovery returns the wrong answer. Dijkstra (and A*) stop only when the goal is <b>popped from OPEN</b> as the minimum.</p></div>
+<div class="co pitfall" data-t="Watch out · negative costs break Dijkstra">
+<div class="side wide-r">
+<figure class="fig" style="margin:0"><div class="panel"><img src="fig/l8_negative.svg" alt=""></div></figure>
+<p>Edges S→A (2), S→B (3), B→A (−2). Dijkstra pops A first with $g = 2$ and declares it final, yet the route S→B→A costs 3 − 2 = 1. The "nothing can beat the minimum" argument needs non-negative costs — that is why the slides list them as a requirement.</p>
+</div></div>
+<div class="co beyond"><p>With a binary heap Dijkstra takes about $O((|V| + |E|)\log|V|)$ time. On a grid it expands nodes in growing rings of equal cost around S — it has no idea where the goal is, which is exactly what A* fixes.</p></div>
+
+<h2>A*: adding a sense of direction</h2>
+<div class="co intuition" data-t="In plain English"><p>Dijkstra asks only "how far have I come?". A* also asks "how far do I probably still have to go?" and picks the node whose <b>estimated total trip</b> is smallest. A route that has been cheap so far but heads away from the goal stops looking attractive. The estimate is called the <b>heuristic</b> $h$ — for a robot on a map, typically the straight-line or Manhattan distance to the goal.</p></div>
+$$f(v) = g(v) + h(v), \qquad u \in \argmin_{v \in \mathrm{OPEN}} f(v)$$
+<ul>
+<li>$g$: actual cost of the path found to $v$; $h$: estimate of the remaining cost from $v$ to G; $f$: the priority used to pick candidates.</li>
+<li>Only the <b>order</b> of processing changes. What is minimized is still the real path cost: relaxation (lines 10–13) uses real edge costs exactly as in Dijkstra; only lines 03 and 14 insert with the key $g + h$.</li>
+<li>$h = 0$ makes A* identical to Dijkstra. With a consistent $h$ and $h(G) = 0$, both find an optimal path.</li>
+</ul>
+<div class="co example split" data-t="Worked example · A* on the slide graph (slides 5–7)">
+<p>Heuristic from the slides: $h(A) = 5$, $h(B) = 4$, $h(C) = 2$, $h(D) = 9$, $h(G) = 0$. The slides do not show $h(S)$ or $h(E)$; we use $h(S) = 7$ and $h(E) = 4$, which keep $h$ consistent.</p>
+<table class="tbl compact">
+<tr><th style="width:7%">Step</th><th style="width:17%">Pop (f = g + h)</th><th>Relaxations (new g, new f)</th><th style="width:22%">OPEN afterwards (f)</th></tr>
+<tr><td>1</td><td>S (0 + 7 = 7)</td><td>A: g 2, f 2 + 5 = 7 · B: g 6, f 6 + 4 = 10 · D: g 1, f 1 + 9 = 10</td><td>A:7, B:10, D:10</td></tr>
+<tr><td>2</td><td>A (2 + 5 = 7)</td><td>B: $g(B) \leftarrow \min\{6, 2 + 1\} = 3$, $f(B) = 3 + 4 = 7$ · C: g 7, f 9</td><td>B:7, C:9, D:10</td></tr>
+<tr><td>3</td><td>B (3 + 4 = 7)</td><td>C: 3 + 2 = 5 &lt; 7, f 5 + 2 = 7 · E: g 4, f 4 + 4 = 8</td><td>C:7, E:8, D:10</td></tr>
+<tr><td>4</td><td>C (5 + 2 = 7)</td><td>G: g 8, f 8</td><td>G:8, E:8, D:10</td></tr>
+<tr><td>5</td><td>G (8)</td><td>goal popped → stop (tie with E broken toward the larger g)</td><td>—</td></tr>
+</table>
+<p>Same answer, <b>S→A→B→C→G, cost 8</b>, after <b>4</b> expansions instead of Dijkstra's 6: A* never expanded D (f = 10 looked too expensive) and left E waiting in OPEN.</p>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l8_astar.svg" alt=""></div>
+<figcaption>Top: the heuristic, and the f-values right after S is expanded — Dijkstra would now pick D (g = 1), A* picks A (f = 7), as on slide 5. Bottom: the nodes each method expands before the goal is popped.</figcaption></figure>
+<div class="co tip"><p>For exam traces, use a table with columns <i>pop · relaxations · OPEN</i>, keep both $g$ and $f$ for every OPEN entry, and say how you break ties. Point out explicitly whenever a node's $g$ improves (like B: 6 → 3) — that is where marks are won or lost.</p></div>
+
+<h2>Good heuristics: admissible and consistent</h2>
+<div class="co intuition" data-t="In plain English"><p>A heuristic is a guess about the remaining cost. Two properties make the guess safe. <b>Admissible</b>: the guess is never more than the truth — it is optimistic, like a straight-line distance that can never exceed the real road distance. <b>Consistent</b>: the guess never drops by more than you actually pay when you take one step — moving along one edge can lower the estimate by at most that edge's cost. Optimism guarantees you don't skip the best route; consistency also guarantees you never have to revisit a node.</p></div>
+<table class="tbl">
+<tr><th style="width:17%"></th><th>Definition</th><th style="width:38%">Guarantee</th></tr>
+<tr><td><b>Admissible</b><br><span class="small">all nodes</span></td><td>$0 \le h(v) \le h^{*}(v)$, where $h^{*}(v)$ is the true shortest cost from $v$ to G — never overestimates the remaining cost</td><td>optimal path, <b>if</b> CLOSED nodes whose $g$ improves are put back into OPEN (re-expansion allowed)</td></tr>
+<tr><td><b>Consistent</b><br><span class="small">all edges</span></td><td>$h(u) \le c(u,v) + h(v)$ for every edge, and $h(G) = 0$ — a triangle inequality</td><td>optimal path <b>without</b> re-expansion: a node popped with the minimum $f$ already has its shortest $g$</td></tr>
+</table>
+<p><b>Consistency ⇒ admissibility</b> when $h(G) = 0$: add the inequality along the shortest path from $v$ to G, and the $h$ terms telescope to $h(v) \le h^{*}(v)$. The converse does not hold in general — an admissible $h$ can still be inconsistent.</p>
+<div class="co example" data-t="Worked example · check the slide heuristic">
+<p>True costs to G: $h^{*}(S) = 8$, $h^{*}(A) = 6$, $h^{*}(B) = 5$ (slide 6: $2 + 3$), $h^{*}(C) = 3$, $h^{*}(D) = 16$, $h^{*}(E) = 6$.</p>
+<ul>
+<li><b>Admissible?</b> $5 \le 6$, $4 \le 5$, $2 \le 3$, $9 \le 16$, $7 \le 8$, $4 \le 6$ — yes, for every node.</li>
+<li><b>Consistent?</b> Check $h(u) \le c(u,v) + h(v)$ on each edge: A→B $5 \le 1 + 4$ (tight) · B→C $4 \le 2 + 2$ (tight) · A→C $5 \le 5 + 2$ · C→G $2 \le 3 + 0$ · B→E $4 \le 1 + 4$ · E→G $4 \le 6$ · D→E $9 \le 10 + 4$ · S→A $7 \le 2 + 5$ · S→B $7 \le 6 + 4$ · S→D $7 \le 1 + 9$ — yes.</li>
+</ul>
+</div>
+<div class="co example" data-t="Extra example · why inconsistency forces re-expansion">
+<div class="side wide-r">
+<figure class="fig" style="margin:0"><div class="panel"><img src="fig/l8_reexp.svg" alt=""></div></figure>
+<div>
+<p>$h(A) = 4$ is admissible ($h^{*}(A) = 1 + 3 = 4$) but inconsistent: $4 > c(A,B) + h(B) = 1$.</p>
+<ol class="steps">
+<li>Pop S: A gets $f = 1 + 4 = 5$, B gets $f = 4 + 0 = 4$.</li>
+<li>Pop B (f = 4): G gets $g = 7$. B is now CLOSED with $g = 4$.</li>
+<li>Pop A (f = 5): A→B gives $1 + 1 = 2 < 4$ — but B is already CLOSED.</li>
+<li>Without re-expansion G keeps $g = 7$ (wrong). With re-expansion B goes back to OPEN and G gets the true cost 5.</li>
+</ol>
+</div></div></div>
+<div class="co key"><p>With a consistent $h$, f never decreases along a path, so A* behaves like Dijkstra on the "reduced" costs $c(u,v) - h(u) + h(v) \ge 0$. Among admissible heuristics, a <b>larger</b> $h$ (closer to $h^{*}$) means fewer expansions: $h = 0$ is the weakest (plain Dijkstra), $h = h^{*}$ walks straight to the goal.</p></div>
+
+<h2>Weighted A*: faster, with a quality bound</h2>
+<div class="co intuition" data-t="In plain English"><p>Weighted A* turns up the volume on the heuristic: it trusts "how close to the goal does this look?" more than "how much has this cost so far?". The search dives toward the goal greedily and usually finds a route much sooner — but it may lock onto a route that is not the cheapest. The weight ε sets the deal: the route you get never costs more than ε times the optimum.</p></div>
+$$f_\varepsilon(v) = g(v) + \varepsilon\,h(v), \quad \varepsilon \ge 1, \qquad J(P) \le \varepsilon\,J^{*}$$
+<ul>
+<li>ε = 1 is ordinary A*. ε &gt; 1 aims to find a first path quickly; it favors nodes with small $h$ and may miss the optimum.</li>
+<li>ε changes only the <b>priority</b>. Updates still use the real edge costs: if $g(u) + c(u,v) < g(v)$, update $g(v)$ and parent($v$).</li>
+<li>A larger ε does not <em>always</em> mean fewer expansions — a greedy dive can run into a dead end and have to back up.</li>
+</ul>
+<div class="co example" data-t="Extra example · ε = 2 on the slide graph">
+<ol class="steps">
+<li>Pop S ($f = 0 + 2 \cdot 7 = 14$): A $2 + 10 = 12$, B $6 + 8 = 14$, D $1 + 18 = 19$.</li>
+<li>Pop A (12): B improves to $g = 3$, $f = 3 + 8 = 11$; C gets $g = 7$, $f = 7 + 4 = 11$.</li>
+<li>Tie at 11; breaking toward the larger $g$ pops C: G gets $g = 10$, $f = 10$.</li>
+<li>Pop G (10) → stop. Route <b>S→A→C→G, cost 10</b>, after only 3 expansions.</li>
+</ol>
+<p>Check the bound: $10 \le 2 \times 8 = 16$ — near-optimal, not optimal. Had the tie gone to B, this run would have found the 8-cost route: with ε &gt; 1, small details decide which route you get.</p>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l8_weighted.svg" alt=""></div>
+<figcaption>Weighted A* (ε = 2) locks onto S–A–C–G before it ever looks at the cheaper detour through B.</figcaption></figure>
+
+<h2>Reusing results: ARA*, the anytime planner</h2>
+<div class="co intuition" data-t="In plain English"><p>A robot often has a deadline — say 100 ms to produce a plan. ARA* hands over a usable route almost immediately (large ε), then keeps working in whatever time remains, lowering ε step by step and polishing the route. What makes this cheap: everything learned so far stays valid. The stored $g$ values are costs of real paths and the parents still describe real routes; only the <b>priorities</b> need recomputing with the new ε.</p></div>
+<p>Keep the graph and $h$ fixed and lower only ε. Continue from the stored $g$ and parent, and recompute $f_\mathrm{new}(v) = g(v) + \varepsilon_\mathrm{new}h(v)$ for the candidates — old path costs are not compared with $h$ directly. During the search the usual update applies: if $g(u) + c(u,v) < g(v)$, then $g(v) \leftarrow g(u) + c(u,v)$ and parent($v$) ← $u$; here $g(u)$ is the starting value for the new candidate and $g(v)$ the value to beat.</p>
+<div class="flow">
+  <div class="st"><b>① Prepare candidates</b>OPEN ← OPEN ∪ INCONS; key ← g + εh; CLOSED ← ∅, INCONS ← ∅</div><div class="ar">›</div>
+  <div class="st"><b>② Search to the stop rule</b>until the smallest key in OPEN ≥ g(G), with g(G) &lt; ∞</div><div class="ar">›</div>
+  <div class="st"><b>③ Store the path</b>bound of the finished stage: J(P) ≤ ε·J*</div><div class="ar">›</div>
+  <div class="st"><b>Time left and ε &gt; 1?</b>yes: lower ε and repeat · no: return the stored path</div>
+</div>
+<p><b>INCONS</b> holds nodes whose $g$ dropped after they were already expanded in the current round. They are not re-expanded within the round (that keeps each round fast and its bound valid) but rejoin OPEN at the start of the next round. $g$ and parent persist between rounds, and finishing the ε = 1 stage gives the global optimum. (Conditions: finite graph, positive edge costs, consistent $h$, $h(G) = 0$, and a path exists.)</p>
+<div class="co example split" data-t="Extra example · ARA* with ε = 2, then ε = 1">
+<p><b>Round 1 (ε = 2)</b> — the Weighted A* run above: it expands S, A and C and stops with $g(G) = 10$, because the smallest key in OPEN (G at 10) is ≥ $g(G)$. Stored: $g(S) = 0$, $g(A) = 2$, $g(B) = 3$, $g(C) = 7$, $g(D) = 1$, $g(G) = 10$; OPEN = {B, D, G}; INCONS is empty. <b>Deliver S–A–C–G (10), guaranteed ≤ 16.</b></p>
+<p><b>Round 2 (ε = 1)</b> — recompute keys: B $3 + 4 = 7$, G $10 + 0 = 10$, D $1 + 9 = 10$; clear CLOSED.</p>
+<ol class="steps">
+<li>Pop B (7): C improves $7 \to 3 + 2 = 5$ (key 7); E gets $g = 4$ (key 8).</li>
+<li>Pop C (7): G improves $10 \to 5 + 3 = 8$ (key 8).</li>
+<li>The smallest key is now 8 ≥ $g(G) = 8$ → stop. <b>Deliver S–A–B–C–G (8) — optimal.</b></li>
+</ol>
+<p>Round 2 needed only <b>2</b> expansions where a fresh A* needs 4. That saving is the whole point of reuse.</p>
+</div>
+
+<h2>When the map changes</h2>
+<div class="co intuition" data-t="In plain English"><p>Maps are not fixed: a door closes, a road is blocked, a sensor finds that an area is free after all. Now the real edge costs change, not ε. A change can break the current route (it can no longer be driven) or make it second-best (something cheaper appeared). Either way the plan must be re-examined — ideally without throwing away everything already known.</p></div>
+<figure class="fig"><div class="panel"><img src="fig/l8_changes.svg" alt=""></div>
+<figcaption>Slide 11's two independent changes. Left: B→C closes (2 → ∞); the route through B→C can no longer be used and $J^{*}$ rises from 8 to 10. Right: S→B gets cheaper (6 → 1); the old route still works but is no longer optimal, and $J^{*}$ falls from 8 to 6.</figcaption></figure>
+<p>Restarting A* from scratch after every change wastes work, because most stored $g$ values are still correct. The next step is to find exactly which nodes need reprocessing, starting from the previous $g$ — that is what LPA* does.</p>
+
+<h2>LPA*: repair instead of restart</h2>
+<div class="co intuition" data-t="In plain English"><p>Think of a spreadsheet: when you change one cell, only the cells that depend on it are recalculated. LPA* keeps the old cost $g$ of every node and also computes what the cost <em>should</em> be from the predecessors' current values — this one-step look-ahead is called <b>rhs</b>. Wherever the two disagree, something changed nearby, and only those nodes go into OPEN. Nodes where $g$ and rhs agree are never touched.</p></div>
+$$\mathrm{rhs}(S) = 0, \qquad \mathrm{rhs}(v) = \min_{u \in \mathrm{Pred}(v)}\left[g(u) + c(u,v)\right] \quad (v \ne S)$$
+<ul>
+<li>$g(v)$: cost stored by the previous search. rhs($v$): the candidate recomputed from the predecessors' current $g$.</li>
+<li>$g(v) = \mathrm{rhs}(v)$: <b>locally consistent</b> — nothing to do. (A different notion from heuristic consistency.)</li>
+<li>$g(v) \ne \mathrm{rhs}(v)$: put $v$ in OPEN. Checking starts at the head node of the changed edge.</li>
+</ul>
+<table class="tbl">
+<tr><th style="width:25%">Case</th><th>Meaning</th><th style="width:38%">Action when popped</th></tr>
+<tr><td>$g &gt; \mathrm{rhs}$ (overconsistent)</td><td>a cheaper way in has appeared</td><td>adopt it: $g \leftarrow \mathrm{rhs}$, then update the successors</td></tr>
+<tr><td>$g &lt; \mathrm{rhs}$ (underconsistent)</td><td>the stored cost relied on something that got worse</td><td>invalidate: $g \leftarrow \infty$, then update the successors <b>and</b> the node itself</td></tr>
+</table>
+<p>OPEN is ordered by a two-part key that uses $m(u) = \min(g(u), \mathrm{rhs}(u))$ in place of A*'s $g$:</p>
+$$K(u) = [k_1, k_2] = [m(u) + h(u),\; m(u)]$$
+<p>$k_1$ (the estimated total cost) decides first; $k_2$ breaks ties. UpdateVertex($v$) recomputes rhs($v$), then puts $v$ in OPEN (or refreshes its key) if $g \ne \mathrm{rhs}$, or removes it if $g = \mathrm{rhs}$. The search stops when the goal has $g = \mathrm{rhs}$ and the smallest key in OPEN is ≥ the goal's key.</p>
+<div class="co example split" data-t="Worked example · B→C closed (slides 12–13, h = 0)">
+<p>Stored from the previous search: $g(A) = 2$, $g(B) = 3$, $g(C) = 5$, $g(E) = 4$, $g(G) = 8$. The edge B→C becomes ∞:</p>
+$$\mathrm{rhs}(C) = \min\left(g(A) + 5,\; g(B) + \infty\right) = \min(7, \infty) = 7 \ne g(C) = 5 \;\Rightarrow\; C \text{ enters OPEN}$$
+<table class="tbl compact">
+<tr><th style="width:5%">#</th><th style="width:14%">Pop (key)</th><th style="width:13%">Case</th><th>Action</th><th style="width:20%">(g, rhs) afterwards</th></tr>
+<tr><td>①</td><td>C (5, 5)</td><td>g &lt; rhs</td><td>invalidate: $g(C) = \infty$; update G: rhs(G) = min(∞ + 3, 4 + 6) = 10; C re-enters with key (7, 7)</td><td>C (∞, 7) · G (8, 10)</td></tr>
+<tr><td>②</td><td>C (7, 7)</td><td>g &gt; rhs</td><td>apply rhs: $g(C) = 7$; update G: rhs(G) = min(7 + 3, 4 + 6) = 10</td><td>C (7, 7) · G (8, 10)</td></tr>
+<tr><td>③</td><td>G (8, 8)</td><td>g &lt; rhs</td><td>invalidate: $g(G) = \infty$; G re-enters with key (10, 10)</td><td>G (∞, 10)</td></tr>
+<tr><td>④</td><td>G (10, 10)</td><td>g &gt; rhs</td><td>apply rhs: $g(G) = 10$; OPEN is empty → done</td><td>G (10, 10)</td></tr>
+</table>
+<p>C is processed again before G because, after ①, key(C) = (7, 7) &lt; key(G) = (8, 8). The new shortest cost, <b>10</b>, was found by touching only C and G — never S, A, B, D or E.</p>
+</div>
+<div class="co example" data-t="Extra example · S→B gets cheaper (6 → 1)">
+<p>Now rhs(B) = min(g(S) + 1, g(A) + 1) = min(1, 3) = 1 &lt; g(B) = 3: B is overconsistent.</p>
+<ol class="steps">
+<li>Pop B (key 1): $g(B) = 1$. Its successors change: rhs(C) = min(2 + 5, 1 + 2) = 3 &lt; 5 and rhs(E) = min(1 + 10, 1 + 1) = 2 &lt; 4.</li>
+<li>Pop E (2): $g(E) = 2$. Pop C (3): $g(C) = 3$, so rhs(G) = min(3 + 3, 2 + 6) = 6 &lt; 8.</li>
+<li>Pop G (6): $g(G) = 6$ — the new optimum S→B→C→G. Every step was "apply rhs": improvements never need invalidation.</li>
+</ol>
+</div>
+
+<h2>D* Lite: replanning while the robot moves</h2>
+<div class="co intuition" data-t="In plain English"><p>LPA* stores costs <em>from the start</em>. But a robot moves: after every step its "start" is somewhere else, and all those costs would change. D* Lite flips the search around and stores, for every node, the cost <b>from that node to the goal</b> — the cost-to-go. The goal doesn't move, so these values stay valid wherever the robot is. To drive, the robot simply steps to the neighbor with the smallest "edge cost + cost-to-go", like water running downhill. When it discovers a change, D* Lite repairs the cost-to-go values exactly the way LPA* repairs $g$.</p></div>
+<table class="tbl compact">
+<tr><th style="width:16%"></th><th>A* · LPA*</th><th>D* Lite</th></tr>
+<tr><td>$g$ means</td><td>cost from the start to the node (S→v)</td><td>cost from the node to the fixed goal (v→G)</td></tr>
+<tr><td>$h$ means</td><td>estimate from the node to the goal (v→G)</td><td>estimate from the current position S to the node (S→v)</td></tr>
+</table>
+$$\mathrm{rhs}_\mathrm{to}(G) = 0, \qquad \mathrm{rhs}_\mathrm{to}(u) = \min_{v \in \mathrm{Succ}(u)}\left[c(u,v) + g_\mathrm{to}(v)\right] \;\; (u \ne G), \qquad v_\mathrm{next} \in \argmin_{v \in \mathrm{Succ}(B)}\left[c(B,v) + g_\mathrm{to}(v)\right]$$
+<div class="co example" data-t="Worked example · cost-to-go on the slide graph (slide 14)">
+<p>Work backward from G: $g_\mathrm{to}(G) = 0$, $g_\mathrm{to}(C) = 3$, $g_\mathrm{to}(E) = 6$, $g_\mathrm{to}(B) = \min(2 + 3, 1 + 6) = 5$, $g_\mathrm{to}(A) = \min(5 + 3, 1 + 5) = 6$, $g_\mathrm{to}(D) = 10 + 6 = 16$, $g_\mathrm{to}(S) = \min(2 + 6, 6 + 5, 1 + 16) = 8$.</p>
+<p>A cost from the start depends on where "the start" is: from S, B is 3 away ($g_\mathrm{from\,S}(B) = 3$); once the robot reaches A, only 1 ($g_\mathrm{from\,A}(B) = 1$). The cost-to-go of B, 5, does not care where the robot is.</p>
+</div>
+<div class="co example split" data-t="Worked example · B→C turns out to be closed while the robot is at B (slide 15, h = 0)">
+<p>The robot has driven S→A→B and plans to continue B→C→G. At B its sensors show that B→C is closed. Keep the <b>repair</b> (computation) separate from the <b>move</b> (action):</p>
+<ol class="steps">
+<li>$\mathrm{rhs}_\mathrm{to}(B) = \min\left(c(B,C) + g_\mathrm{to}(C),\; c(B,E) + g_\mathrm{to}(E)\right) = \min(\infty + 3,\; 1 + 6) = 7 \ne 5$. B has $g &lt; \mathrm{rhs}$: invalidate, $g_\mathrm{to}(B)$: 5 → ∞.</li>
+<li>A's cost-to-go relied on B: $\mathrm{rhs}_\mathrm{to}(A) = \min(5 + 3, 1 + \infty) = 8 \ne 6$. A has the smaller key (6 &lt; 7), so it goes first: $g_\mathrm{to}(A)$: 6 → ∞.</li>
+<li>B is popped with key 7: $g_\mathrm{to}(B)$: ∞ → 7. The robot's own node is consistent again and nothing in OPEN has a smaller key → stop repairing.</li>
+<li><b>Move:</b> compare B's successors: via C, $\infty + 3$; via E, $1 + 6 = 7$ → drive B→E. Remaining cost 7.</li>
+</ol>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l8_dstar.svg" alt=""></div>
+<figcaption>Left: cost-to-go values before the change; the robot (orange) has reached B. Right: after the repair, the route to follow is B→E→G with remaining cost 7.</figcaption></figure>
+<h3>The key modifier k<sub>m</sub></h3>
+<div class="co intuition" data-t="In plain English"><p>OPEN is sorted by keys that include $h$ measured from the robot's position. Every time the robot moves, all of those keys are slightly out of date. Recomputing them all would be expensive, so D* Lite keeps one running correction, $k_m$ — "how far the robot has moved, in heuristic terms" — and adds it to every new key. Old keys then remain <em>lower bounds</em> of the correct ones: when an old node reaches the front of the queue, its key is recomputed, and if it was stale the node is simply put back.</p></div>
+$$K(s) = \left[m(s) + h(S, s) + k_m,\; m(s)\right], \qquad k_m \leftarrow k_m + h(S_\mathrm{old}, S_\mathrm{new}), \qquad m(s) = \min\left(g(s), \mathrm{rhs}(s)\right)$$
+<div class="side wide-r">
+<figure class="fig" style="margin:0"><div class="panel"><img src="fig/l8_km.svg" alt=""></div></figure>
+<div class="co example" style="margin:0" data-t="Worked example · slide 16">
+<p>Manhattan grid, unit steps; X keeps $g = 8$ and rhs = 7, so $m(X) = 7$.</p>
+<ol class="steps">
+<li>Robot at A: $K_\mathrm{old}(X) = [7 + 5 + 0, 7] = [12, 7]$.</li>
+<li>Robot moves A→B: $k_m$: 0 → 3.</li>
+<li>$K_\mathrm{new}(X) = [7 + 4 + 3, 7] = [14, 7]$. The stored key (12, 7) is smaller, so when X is popped it is reinserted with (14, 7).</li>
+</ol>
+<p class="small">Without the correction, $k_1 = 7 + 4 = 11$ would be compared with keys computed from A — apples and oranges.</p>
+</div></div>
+<p>Why it works: $h$ is non-negative, admissible and satisfies the triangle inequality $h(S_\mathrm{new}, s) + h(S_\mathrm{old}, S_\mathrm{new}) \ge h(S_\mathrm{old}, s)$ — here $4 + 3 \ge 5$. $k_m$ is added only to keys; it never changes $g$, rhs or the real move costs.</p>
+
+<h2>Huge maps I: HPA* (hierarchical path-finding)</h2>
+<div class="co intuition" data-t="In plain English"><p>Plan like a traveler: first decide which cities and highway exits to pass through, then work out the streets inside each city. HPA* cuts the grid into clusters, picks a few <b>portals</b> on the borders between clusters, and remembers in advance how much it costs to cross each cluster from one portal to another. A query then runs A* on this small "portal graph" and only afterwards fills in the cell-by-cell path.</p></div>
+<ol class="steps" style="--c: var(--orange)">
+<li><b>Preprocess</b> (once per map): split into clusters → choose portals → store the shortest cost inside each cluster between its portals, $c(p, q) = \min J(P)$ over p→q paths P that stay in the same cluster. A high-level edge stands for an inner path and its cost; neighboring clusters are joined by crossing edges.</li>
+<li><b>Query:</b> insert S and G into the abstract graph (connect them to the portals of their clusters) and run A* there.</li>
+<li><b>Refine:</b> replace each chosen abstract edge by its stored grid path.</li>
+</ol>
+<figure class="fig"><div class="panel"><img src="fig/l8_hpa.svg" alt=""></div>
+<figcaption>Slide 18's abstract graph (12 × 10 grid, 4 clusters, 8 portals a–h, S and G inserted). A* picks S–c–d–g–h–G with cost 18; the true grid optimum is 16.</figcaption></figure>
+<div class="co example" data-t="Worked example · slides 17–18">
+<p>The inner path a→c (cost 6) is computed once and stored. With S and G inserted, the candidates are S–c–d–g–h–G = 4 + 1 + 5 + 1 + 7 = <b>18</b> and S–a–b–e–f–G = 6 + 1 + 8 + 1 + 4 = 20, so A* returns 18. Refined into grid cells, the route is 2 cells longer than the true shortest path (16): <b>optimality holds on the abstract graph only</b>, because the choice of portals can rule out the true shortest path.</p>
+</div>
+<div class="co key"><p>The trade-off: the abstract graph is tiny, so queries are fast, and the preprocessing is shared by every query — at the price of a slightly longer route. More portals means better routes but a bigger abstract graph.</p></div>
+
+<h2>Huge maps II: Contraction Hierarchies</h2>
+<div class="co intuition" data-t="In plain English"><p>Car navigation on a country-sized road network must answer millions of queries on a map that rarely changes. Contraction Hierarchies spend time once, in advance: they rank the nodes by importance and add "express lanes" (<b>shortcuts</b>) that skip over unimportant nodes. A query then searches only upward in importance — from the start and from the goal at the same time — and meets in the middle on the express network. The answer is still exactly optimal.</p></div>
+<ul>
+<li><b>Contracting</b> a node $v$ removes it from the working graph. For each pair of neighbors $u, w$ whose shortest connection ran through $v$, a <b>shortcut</b> u→w with the same cost is added — unless a <b>witness</b> path that avoids $v$ is just as cheap. The rule: add the shortcut if the shortest detour avoiding $v$ costs more than the path through $v$.</li>
+<li>Nodes are contracted in some order (e.g. smallest <b>Edge Difference</b> first, where Edge Difference = shortcuts added − edges removed); a node's position in that order is its <b>rank</b>.</li>
+<li>A query runs Dijkstra from S and from G, each relaxing only edges toward <b>higher</b> rank; where they meet gives the route, and shortcuts are unpacked into the original roads (u→w is returned as u→v→w). Original nodes and shortcuts are stored apart from the working graph; of duplicate edges with the same direction and endpoints, only the cheaper is kept.</li>
+</ul>
+<figure class="fig"><div class="panel"><img src="fig/l8_ch.svg" alt=""></div>
+<figcaption>Slide 20: removing v without a shortcut would stretch the u–w distance to 6; the shortcut keeps it at 5. The final CH here has 4 nodes and 5 edges.</figcaption></figure>
+<div class="co example" data-t="Worked example · slides 19–20">
+<p><b>Shortcut decision:</b> through v, u→w costs 2 + 3 = 5; the best witness avoiding v is u→z→w = 3 + 3 = 6 &gt; 5, so add the shortcut u→w (5). Edge Difference = 1 added − 2 removed = −1.</p>
+<p><b>Query speed:</b> on slide 19's 37-node road grid, Dijkstra expands 30 nodes; the CH query expands 8 in total over both directions (preprocessing excluded; the meeting node counted twice) — and both return the same path cost, 30.</p>
+<p class="small">If z–w cost 2 instead, the witness u→z→w would cost 5 ≤ 5 and no shortcut would be needed.</p>
+</div>
+
+<h2>Executing the route with an FSM</h2>
+<div class="co intuition" data-t="In plain English"><p>Finding a route is not the same as driving it. Something must decide, at every moment, whether to keep following the route, pause (a person stepped in front, an operator pressed "wait"), compute a new route (the current one became invalid), or stop because the mission is done. A finite-state machine (FSM) is the simplest reliable way to write these rules down: a small set of modes, and clear conditions for switching between them.</p></div>
+<div class="side wide-l">
+<figure class="fig" style="margin:0"><div class="panel"><img src="fig/l8_fsm.svg" alt=""></div></figure>
+<div>
+<p><b>Inputs</b> $z = (a, d, r)$: $a$ = hold request, $d$ = mission done, $r$ = route valid for the current position and map.</p>
+<p><b>States</b> $q$: FollowRoute (runs a valid route), Hold (paused), Replan (one replan on entry, then the new route is verified), Arrived (mission over).</p>
+$$q_{k+1} = \delta(q_k, z_k)$$
+</div></div>
+<h3>Guards and their priority</h3>
+<p>Several inputs can be true at once — a hold request may arrive just as the route becomes invalid. The design must say which wins. The slides' policy checks <b>a → d → r</b> in that order, a design choice that puts a hold request first:</p>
+$$\text{Hold}: a \qquad \text{Arrived}: \neg a \wedge d \qquad \text{Replan}: \neg a \wedge \neg d \wedge \neg r \qquad \text{FollowRoute}: \neg a \wedge \neg d \wedge r$$
+<p>The four guards are mutually exclusive and together cover every input, so exactly one state is chosen at every step — no ambiguity and no gaps.</p>
+<div class="co example" data-t="Worked example · slide 22">
+<table class="tbl compact">
+<tr><th>k</th><th class="c">a</th><th class="c">d</th><th class="c">r</th><th>First guard that holds</th><th>$q_{k+1}$</th></tr>
+<tr><td>0</td><td class="c">0</td><td class="c">0</td><td class="c">1</td><td>¬a ∧ ¬d ∧ r</td><td>FollowRoute</td></tr>
+<tr><td>1</td><td class="c">0</td><td class="c">0</td><td class="c">0</td><td>¬a ∧ ¬d ∧ ¬r</td><td>Replan</td></tr>
+<tr><td>2</td><td class="c">1</td><td class="c">0</td><td class="c">1</td><td>a</td><td>Hold</td></tr>
+<tr><td>3</td><td class="c">0</td><td class="c">0</td><td class="c">1</td><td>¬a ∧ ¬d ∧ r</td><td>FollowRoute</td></tr>
+<tr><td>4</td><td class="c">0</td><td class="c">1</td><td class="c">1</td><td>¬a ∧ d</td><td>Arrived</td></tr>
+</table>
+</div>
+
+<h2>Hysteresis: stop flip-flopping between routes</h2>
+<div class="co intuition" data-t="In plain English"><p>Suppose two routes are both fine and cost almost the same. Their costs wobble a little with traffic or sensor noise, so "always take the cheaper one" makes the robot switch back and forth — unsettling for passengers and bad for control. Hysteresis adds a margin: switch only when the other route is better by more than δ. Small wobbles are ignored; big, real differences still win.</p></div>
+$$\Delta J = J_A - J_B, \qquad A \to B \text{ if } \Delta J > \delta, \qquad B \to A \text{ if } \Delta J < -\delta, \qquad -\delta \le \Delta J \le \delta: \text{ keep the current choice}$$
+<figure class="fig"><div class="panel"><img src="fig/l8_hyst.svg" alt=""></div>
+<figcaption>Slide 23's example (ΔJ values read from the plot): choosing the cheaper route at every step gives 6 switches; with δ = 2 only 2 switches happen, at k = 4 and k = 7.</figcaption></figure>
+<div class="co example" data-t="Worked example · slide 23">
+<p>ΔJ ≈ (0.5, −0.3, 0.6, −0.1, 2.6, 1.1, −0.4, −2.6), initial choice $R_A$.</p>
+<ul>
+<li><b>Always cheapest</b> (B whenever ΔJ &gt; 0): B, A, B, A, B, B, A, A → <b>6 switches</b>.</li>
+<li><b>Hysteresis, δ = 2:</b> stay on A until ΔJ = 2.6 &gt; 2 at k = 4 → B; stay on B until ΔJ = −2.6 &lt; −2 at k = 7 → A → <b>2 switches</b>.</li>
+</ul>
+</div>
+<div class="co pitfall"><p>Compare the costs with the same current position, goal and map — otherwise ΔJ means nothing. And hysteresis applies only between <b>valid</b> routes: if the current route becomes invalid, replace it immediately, regardless of the cost difference. A larger δ means fewer switches, but possibly staying up to δ longer on a worse route.</p></div>
+
+<h2>Choosing the right method</h2>
+<table class="tbl">
+<tr><th style="width:27%">Situation</th><th style="width:22%">Method</th><th>Why</th></tr>
+<tr><td>one query, no good heuristic</td><td>Dijkstra</td><td>simple; optimal with c ≥ 0; explores in all directions</td></tr>
+<tr><td>one query, heuristic available</td><td>A*</td><td>optimal with a consistent h; far fewer expansions</td></tr>
+<tr><td>tight deadline</td><td>Weighted A*</td><td>fast first path with cost ≤ ε·J*</td></tr>
+<tr><td>deadline, but extra time may come</td><td>ARA*</td><td>anytime: improves the path while time remains, reusing g</td></tr>
+<tr><td>edge costs change, fixed start</td><td>LPA*</td><td>repairs only inconsistent nodes (g ≠ rhs)</td></tr>
+<tr><td>edge costs change, robot moving</td><td>D* Lite</td><td>cost-to-go stays valid as the start moves; k<sub>m</sub> avoids re-sorting OPEN</td></tr>
+<tr><td>large grid, many queries</td><td>HPA*</td><td>tiny abstract graph; near-optimal routes</td></tr>
+<tr><td>huge, fixed road network</td><td>Contraction Hierarchies</td><td>heavy preprocessing, very fast exact queries</td></tr>
+<tr><td>executing any route</td><td>FSM + hysteresis</td><td>clear modes, prioritized guards, no flip-flopping</td></tr>
+</table>
+
+<h2>Formula sheet</h2>
+<div class="fsheet">
+  <div class="f"><div class="n">Path cost</div><div class="eq">$J(P) = \sum_{i=0}^{k-1} c(v_i, v_{i+1}),\ \ c \ge 0$</div></div>
+  <div class="f"><div class="n">Relaxation</div><div class="eq">$g(u) + c(u,v) < g(v) \Rightarrow g(v) \leftarrow g(u) + c(u,v)$</div></div>
+  <div class="f"><div class="n">Dijkstra · A*</div><div class="eq">pop $\argmin g$ · pop $\argmin f$, $f = g + h$</div></div>
+  <div class="f"><div class="n">Stop rule</div><div class="eq">stop when G is popped from OPEN</div></div>
+  <div class="f"><div class="n">Admissible</div><div class="eq">$0 \le h(v) \le h^{*}(v)$ for all nodes</div></div>
+  <div class="f"><div class="n">Consistent</div><div class="eq">$h(u) \le c(u,v) + h(v)$ for all edges, $h(G) = 0$</div></div>
+  <div class="f"><div class="n">Weighted A*</div><div class="eq">$f_\varepsilon = g + \varepsilon h,\ \ J(P) \le \varepsilon J^{*}$</div></div>
+  <div class="f"><div class="n">ARA*</div><div class="eq">OPEN ← OPEN ∪ INCONS; stop when $\min f_\varepsilon \ge g(G)$</div></div>
+  <div class="f"><div class="n">LPA* rhs</div><div class="eq">$\mathrm{rhs}(v) = \min_{u \in \mathrm{Pred}(v)}[g(u) + c(u,v)]$</div></div>
+  <div class="f"><div class="n">LPA* key</div><div class="eq">$K = [m + h, m],\ m = \min(g, \mathrm{rhs})$</div></div>
+  <div class="f"><div class="n">D* Lite</div><div class="eq">$\mathrm{rhs}_\mathrm{to}(u) = \min_{v \in \mathrm{Succ}(u)}[c(u,v) + g_\mathrm{to}(v)]$</div></div>
+  <div class="f"><div class="n">Next move</div><div class="eq">$v_\mathrm{next} \in \argmin_{v}[c(S,v) + g_\mathrm{to}(v)]$</div></div>
+  <div class="f"><div class="n">Key modifier</div><div class="eq">$K = [m + h(S,s) + k_m, m],\ k_m \leftarrow k_m + h(S_\mathrm{old}, S_\mathrm{new})$</div></div>
+  <div class="f"><div class="n">HPA* inner edge</div><div class="eq">$c(p,q) = \min J(P)$ inside one cluster</div></div>
+  <div class="f"><div class="n">CH shortcut</div><div class="eq">add if witness &gt; cost via $v$; ED = added − removed</div></div>
+  <div class="f"><div class="n">FSM · hysteresis</div><div class="eq">$q_{k+1} = \delta(q_k, z_k)$; switch only if $|\Delta J| > \delta$</div></div>
+</div>
+
+<div style="break-before: page"></div>
+<h2>Practice problems</h2>
+<p class="qblock-intro">Problems 1–5 use the practice graph below (new numbers, same ideas as the slides). Try each one on paper before reading the solution.</p>
+<figure class="fig"><div class="panel"><img src="fig/l8_practice.svg" alt="" style="max-width:58%"></div>
+<figcaption>Practice graph: S→A 4, S→B 1, S→E 1, B→A 2, A→C 1, B→D 6, C→D 2, C→G 5, D→G 1, E→G 8. Purple: heuristic values used in problems 2–4. E is a decoy: cheap to reach, expensive to leave.</figcaption></figure>
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>Run Dijkstra from S to G on the practice graph. Give the expansion order, the final $g$ of every node and the route. (Break ties alphabetically.)</p></div>
+<div class="a">
+<table class="tbl compact">
+<tr><th style="width:7%">Step</th><th style="width:12%">Pop (g)</th><th>Relaxations</th><th style="width:22%">OPEN afterwards</th></tr>
+<tr><td>1</td><td>S (0)</td><td>A 4 · B 1 · E 1</td><td>B:1, E:1, A:4</td></tr>
+<tr><td>2</td><td>B (1)</td><td>A: 1 + 2 = 3 &lt; 4 → improved · D: 1 + 6 = 7</td><td>E:1, A:3, D:7</td></tr>
+<tr><td>3</td><td>E (1)</td><td>G: 1 + 8 = 9 (discovered, not final)</td><td>A:3, D:7, G:9</td></tr>
+<tr><td>4</td><td>A (3)</td><td>C: 3 + 1 = 4</td><td>C:4, D:7, G:9</td></tr>
+<tr><td>5</td><td>C (4)</td><td>D: 4 + 2 = 6 &lt; 7 → improved · G: 4 + 5 = 9, not &lt; 9</td><td>D:6, G:9</td></tr>
+<tr><td>6</td><td>D (6)</td><td>G: 6 + 1 = 7 &lt; 9 → improved</td><td>G:7</td></tr>
+<tr><td>7</td><td>G (7)</td><td>stop</td><td>—</td></tr>
+</table>
+<p>Final $g$: S 0, B 1, E 1, A 3, C 4, D 6, G 7. Route by parents: <b>S→B→A→C→D→G, cost 7</b>, after 6 expansions (including the decoy E).</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>Run A* with $h$ = (S 6, A 4, B 5, C 3, D 1, E 8, G 0). Which node does A* never expand, and why?</p></div>
+<div class="a">
+<p>Pops: S (f 6) → B (1 + 5 = 6) → A (3 + 4 = 7) → C (4 + 3 = 7) → D (6 + 1 = 7) → G (7 + 0 = 7). Same route, cost 7, after <b>5</b> expansions. E is never expanded: its $f = 1 + 8 = 9$ is larger than the final cost 7, so it never reaches the front of OPEN. Dijkstra expanded it because it only saw $g(E) = 1$ and had no way of knowing that E leads nowhere useful.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>Is this $h$ admissible? Consistent? What changes if $h(A)$ is lowered to 1?</p></div>
+<div class="a">
+<p>True costs to G: $h^{*}$ = S 7, A 4, B 6, C 3, D 1, E 8, so every $h \le h^{*}$ — <b>admissible</b>. Edge checks: S→A $6 \le 4 + 4$, S→B $6 \le 1 + 5$ (tight), S→E $6 \le 1 + 8$, B→A $5 \le 2 + 4$, B→D $5 \le 6 + 1$, A→C $4 \le 1 + 3$ (tight), C→D $3 \le 2 + 1$ (tight), C→G $3 \le 5$, D→G $1 \le 1$ (tight), E→G $8 \le 8$ — <b>consistent</b>.</p>
+<p>With $h(A) = 1$ it stays admissible ($1 \le 4$) but becomes <b>inconsistent</b>: S→A gives $6 \le 4 + 1 = 5$ ✗ and B→A gives $5 \le 2 + 1 = 3$ ✗ — the estimate drops by more than the edge cost when you step into A. A* still returns an optimal route only if CLOSED nodes may be re-expanded.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>Run Weighted A* with ε = 3 (ties toward the larger $g$). Which route is found, and does it respect the guarantee?</p></div>
+<div class="a">
+<ol class="steps">
+<li>Pop S ($f = 0 + 18$): A $4 + 12 = 16$, B $1 + 15 = 16$, E $1 + 24 = 25$.</li>
+<li>Tie at 16 → A (larger g): C gets $g = 5$, $f = 5 + 9 = 14$.</li>
+<li>Pop C (14): D $7 + 3 = 10$, G $10 + 0 = 10$.</li>
+<li>Tie at 10 → G (larger g) → stop. Route <b>S→A→C→G, cost 10</b>, after 3 expansions.</li>
+</ol>
+<p>Guarantee: $10 \le 3 \times 7 = 21$ ✓. Quick but 3 units more expensive than the optimum.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="3">
+<div class="q"><p>After problem 1, the edge C→D closes. Starting from the stored $g$ values, carry out the LPA* repair ($h = 0$). What is the new route?</p></div>
+<div class="a">
+<p>Stored: $g$ = S 0, B 1, E 1, A 3, C 4, D 6, G 7. Only D's incoming edges changed: rhs(D) = min(g(B) + 6, g(C) + ∞) = 7 ≠ 6 → D enters OPEN (key 6).</p>
+<ol class="steps">
+<li>Pop D (6): $g &lt; \mathrm{rhs}$ → invalidate, $g(D) = \infty$. Update G: rhs(G) = min(g(C) + 5, g(D) + 1, g(E) + 8) = min(9, ∞, 9) = 9 ≠ 7. OPEN: D (∞, 7), G (7, 9).</li>
+<li>Pop D (key 7, tie with G broken alphabetically): $g &gt; \mathrm{rhs}$ → $g(D) = 7$. Now rhs(G) = min(9, 7 + 1, 9) = 8.</li>
+<li>Pop G (7): $g &lt; \mathrm{rhs}$ → invalidate, then pop G again (8): $g(G) = 8$.</li>
+</ol>
+<p>New route <b>S→B→D→G, cost 8</b>. Only D and G were touched. (Popping G first at the tie gives the same result in a different order.)</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="1">
+<div class="q"><p>Using step 5 of the slide-graph Dijkstra trace, explain why the search must not stop when the goal is first discovered.</p></div>
+<div class="a"><p>At step 5, G is discovered through E with $g = 10$, but C (g = 5) is still in OPEN and C→G costs only 3, so a route of cost 8 exists. A discovered node's $g$ is only an upper bound. When G is <em>popped</em> as the minimum, every other OPEN node has $g \ge g(G)$ and costs are non-negative, so nothing can improve it any more — only then is $g(G)$ final.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>In ARA*, why can the stored $g$ values and parents be reused when ε is lowered, while the keys in OPEN must be recomputed?</p></div>
+<div class="a"><p>A stored $g(v)$ is the cost of a real path to $v$ that was actually found; that fact does not depend on ε, so it remains a valid upper bound, and the parents still describe that path. The keys $g + \varepsilon h$ <em>do</em> depend on ε — they are only priorities — so with a new ε they must be recomputed (step ① of the loop). Reusing $g$ is what lets round 2 of the slide example finish in 2 expansions instead of 4.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>D* Lite: node $s$ has $g = \mathrm{rhs} = 10$; with the robot at P, $h(P, s) = 6$ and $k_m = 0$. The robot moves P→Q with $h(P, Q) = 2$, and $h(Q, s) = 5$. Give the old and new keys, the new $k_m$, and say what happens when $s$ is popped.</p></div>
+<div class="a"><p>$K_\mathrm{old} = [10 + 6 + 0, 10] = [16, 10]$. After the move $k_m = 0 + 2 = 2$ and $K_\mathrm{new} = [10 + 5 + 2, 10] = [17, 10]$. The stored key (16, 10) is smaller — a lower bound, as guaranteed by the triangle inequality $5 + 2 \ge 6$. When $s$ reaches the front with the stale key, D* Lite recomputes (17, 10), sees it is larger, and reinserts $s$ instead of expanding it.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>Contraction: $v$ has neighbors $u$ and $w$ with $c(u,v) = 4$ and $c(v,w) = 4$; there is also $u$–$x$ (3) and $x$–$w$ (4). Is a shortcut needed when $v$ is contracted? What if $x$–$w$ were 6?</p></div>
+<div class="a"><p>Through $v$: 4 + 4 = 8. Witness avoiding $v$: u→x→w = 3 + 4 = 7 &lt; 8, so the shortest u–w connection never used $v$ — <b>no shortcut</b>; Edge Difference = 0 − 2 = −2. With $x$–$w$ = 6 the witness costs 9 &gt; 8, so the shortcut u→w (8) <b>is</b> added; Edge Difference = 1 − 2 = −1. (A witness exactly equal to 8 would also make the shortcut unnecessary.)</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>With the guard priority a → d → r, find the states for inputs (a, d, r) = (0,0,0), (1,0,0), (1,1,1), (0,0,1), (0,1,0). What changes at the third step if the priority were d → a → r?</p></div>
+<div class="a"><p>Replan, Hold, <b>Hold</b>, FollowRoute, Arrived. At the third step both a and d are true: with a → d → r the hold request wins (Hold); with d → a → r the mission-done signal wins (Arrived). Neither is "correct" — it is a policy decision, which is why the slides say the priority follows the chosen design.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>Two valid routes give ΔJ = (1.0, 2.5, 1.5, −1.0, 3.2, −0.5, −2.5, 0.0), starting on $R_A$. Count the switches for "always cheapest" and for hysteresis with δ = 2.</p></div>
+<div class="a"><p><b>Always cheapest</b> (B if ΔJ &gt; 0, A if ΔJ &lt; 0, keep at 0): B, B, B, A, B, A, A, A → <b>4 switches</b>. <b>δ = 2:</b> A (1.0 ≤ 2), B (2.5 &gt; 2), B, B (−1.0 ≥ −2), B, B, A (−2.5 &lt; −2), A → <b>2 switches</b>.</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>HPA* returned a route of cost 18 where the optimum is 16. Suggest two ways to get closer to 16 and say what each costs.</p></div>
+<div class="a"><ul>
+<li><b>More portals per cluster border</b> (or smaller clusters): the abstract graph contains more of the possible crossings, so better routes become available — at the price of more preprocessing and a larger abstract graph to search.</li>
+<li><b>Post-smoothing / local re-search:</b> after refinement, run A* in the grid inside a corridor around the refined path to straighten detours — extra time per query, but usually close to optimal.</li>
+</ul></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>In LPA*, what do $g &gt; \mathrm{rhs}$ and $g &lt; \mathrm{rhs}$ mean physically? Why must the $g &lt; \mathrm{rhs}$ case also update the node itself?</p></div>
+<div class="a"><p>$g &gt; \mathrm{rhs}$: a cheaper way into the node has appeared (e.g. an edge got cheaper), so the stored cost is too high — simply adopt rhs, as in a normal relaxation. $g &lt; \mathrm{rhs}$: the stored cost relied on something that got worse or disappeared (e.g. a closed edge), so it is too optimistic and cannot be trusted. Setting $g = \infty$ throws the bad value away; afterwards the node usually has a finite rhs from its other predecessors, which makes it overconsistent — so it must go back into OPEN to receive its new, correct cost (like C going (5, 7) → (∞, 7) → (7, 7) on slide 13).</p></div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="1">
+<div class="q"><p>Why does D* Lite store cost-to-go (node → goal) rather than cost-from-start, and how does the robot use those values to move?</p></div>
+<div class="a"><p>The robot's position — the "start" — changes with every step, so costs measured from the start would all change constantly. The goal is fixed, so costs to the goal stay valid as the robot moves; only edge changes require repairs. To move, the robot takes the successor with the smallest $c(\text{here}, v) + g_\mathrm{to}(v)$ — on slide 15, after the repair at B, that is E with 1 + 6 = 7.</p></div>
+</div><!--/qa-->
+</section>
