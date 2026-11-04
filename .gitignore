@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+
+# translator: font subsets (derived from Windows fonts), review renders, run reports
+translation_build/_fontcache/
+translation_build/_review/
+translation_build/report_*.txt
+
+# notes pipeline: intermediate builds, previews, test renders, check output
+exam_prep_build/_build.html
+exam_prep_build/_pass1.pdf
+exam_prep_build/_preview/
+exam_prep_build/_preview.html
+exam_prep_build/_t.pdf
+exam_prep_build/_test.html
+exam_prep_build/_test.pdf
+exam_prep_build/_test_p*.png
+exam_prep_build/_verify_*.txt
+
+*.tmp
