@@ -9,13 +9,24 @@ the English is drawn at the original baseline in the deck's own fonts, shrunk on
 when it would run into something.
 
 Markup inside English strings:
-    {m:..} Cambria Math   {b:..} bold   {r:..} regular   {i:..} Cambria italic
+    {m:..} Cambria Math   {b:..} bold   {r:..} regular   {i:..} Cambria italic   {z:..} Cambria bold italic
     _{..} subscript       ^{..} superscript (both in the preceding run's font)
 Options per item:
     align='center'|'right'   maxw=pt   limit=x   dx dy   size   noscale
     span_range=(i, j)  replace only spans i..j of the matched line
     contains=True      match when the key is contained in the line
     nth=k              only the k-th match on the page
+
+Korean baked into raster images: the spec may define LABELS = {page: [(rect, english, opts), ...]}.
+`rect` (page coords) must enclose the Korean label and nothing else of the same colour; the
+label pixels are found inside it, erased by inpainting a small patch that is laid over the
+untouched original image, and the English is drawn on top as live text.
+Label options: bold, size, color, align='center'|'left'|'right', dx, dy, maxw, lh (line
+height factor; '\\n' in the English splits lines), rot=90 (reads bottom to top),
+mode='all'|'dark'|'color' (which pixels count as text: everything that differs from the
+background / only dark grey pixels / pixels near `tc`), thr, keep=[rects to leave alone],
+pad (mask growth in px), edge=True (also take ink touching the box), inpaint=True (rebuild
+lines running under the label instead of painting the background colour), fill=(r,g,b), bg=(r,g,b).
 """
 import hashlib
 import importlib
@@ -24,6 +35,7 @@ import os
 import re
 import sys
 
+import cv2
 import fitz
 import numpy as np
 from fontTools import subset as ftsubset
@@ -34,7 +46,7 @@ CACHE = os.path.join(HERE, '_fontcache')
 FONTDIR = r'C:\Windows\Fonts'
 FONT_FILES = {
     'MG': ('malgun.ttf', 0), 'MGB': ('malgunbd.ttf', 0),
-    'CM': ('cambria.ttc', 1), 'CAI': ('cambriai.ttf', 0),
+    'CM': ('cambria.ttc', 1), 'CAI': ('cambriai.ttf', 0), 'CAZ': ('cambriaz.ttf', 0),
     'CO': ('consola.ttf', 0), 'SY': ('seguisym.ttf', 0), 'MSG': ('msgothic.ttc', 0),
 }
 FALLBACK = ['MG', 'CM', 'SY', 'MSG']
@@ -95,7 +107,7 @@ def covers(key, ch):
 
 
 # ----------------------------------------------------------------- markup
-TAGS = {'m': 'CM', 'b': 'MGB', 'r': 'MG', 'i': 'CAI', 'c': 'CO'}
+TAGS = {'m': 'CM', 'b': 'MGB', 'r': 'MG', 'i': 'CAI', 'z': 'CAZ', 'c': 'CO'}
 
 
 def parse(s, base):
@@ -226,6 +238,185 @@ def is_container(d, rect):
         and r.y0 <= rect.y0 + 0.5 and r.y1 >= rect.y1 - 0.5 and r.width < 700
 
 
+# ----------------------------------------------------------------- labels inside images
+def page_images(page):
+    out = []
+    for img in page.get_images(full=True):
+        xref, w, h = img[0], img[2], img[3]
+        for r, m in page.get_image_rects(xref, transform=True):
+            if abs(m.b) > 1e-3 * abs(m.a) or abs(m.c) > 1e-3 * abs(m.d) or m.a <= 0 or m.d <= 0:
+                continue            # rotated / flipped placements are not handled
+            out.append(dict(xref=xref, rect=fitz.Rect(r)))
+    return out
+
+
+def image_rgb(doc, xref):
+    pix = fitz.Pixmap(doc, xref)
+    if pix.alpha:
+        pix = fitz.Pixmap(pix, 0)
+    if pix.n != 3:
+        pix = fitz.Pixmap(fitz.csRGB, pix)
+    return np.frombuffer(pix.samples, np.uint8).reshape(pix.h, pix.w, 3).copy()
+
+
+def modal_color(pts):
+    q = pts // 16
+    keys = q[:, 0] * 256 + q[:, 1] * 16 + q[:, 2]
+    vals, cnt = np.unique(keys, return_counts=True)
+    return pts[keys == vals[cnt.argmax()]].mean(axis=0)
+
+
+def do_labels(src, page, pno, labels, report):
+    """Erase the Korean label pixels and draw the English; returns the changed page regions."""
+    regions, work, patches, texts = [], {}, [], []
+    imgs = page_images(page)
+    for it in labels:
+        R, eng = fitz.Rect(it[0]), it[1]
+        o = it[2] if len(it) > 2 else {}
+        c = fitz.Point((R.x0 + R.x1) / 2, (R.y0 + R.y1) / 2)
+        hit = [im for im in imgs if im['rect'].contains(c)]
+        if not hit:
+            report.append('p%d LABEL OUTSIDE IMAGES: %s' % (pno, eng))
+            continue
+        im = hit[-1]
+        x = im['xref']
+        if x not in work:
+            A = image_rgb(src, x)
+            work[x] = (A, A.copy(), im['rect'])
+        A, W, ir = work[x]
+        sx, sy = A.shape[1] / ir.width, A.shape[0] / ir.height
+
+        def px(rr):
+            return (max(int(np.floor((rr.x0 - ir.x0) * sx)), 0), max(int(np.floor((rr.y0 - ir.y0) * sy)), 0),
+                    min(int(np.ceil((rr.x1 - ir.x0) * sx)), A.shape[1]),
+                    min(int(np.ceil((rr.y1 - ir.y0) * sy)), A.shape[0]))
+        i0, j0, i1, j1 = px(R)
+        inR = A[j0:j1, i0:i1].astype(int)
+        h, w = inR.shape[:2]
+        mode = o.get('mode', 'all')
+
+        def find_ink(bg):
+            """Text pixels: differ from the background, pass the mode filter, and belong to a
+            connected component that does not touch the search box (borders, arrows, plot
+            lines run out of the box; glyphs do not)."""
+            dist = np.abs(inR - bg).max(axis=2)
+            ink = dist > o.get('thr', 60)
+            if mode == 'dark':
+                lum, sat = inR.mean(axis=2), inR.max(axis=2) - inR.min(axis=2)
+                ink &= (lum < o.get('lum', 130)) & (sat < o.get('sat', 45))
+            elif mode == 'color':
+                ink &= np.abs(inR - np.array(o['tc'])).max(axis=2) < o.get('tol', 70)
+            for kr in o.get('keep', []):
+                k0, k1, k2, k3 = px(fitz.Rect(kr))
+                ink[max(k1 - j0, 0):max(k3 - j0, 0), max(k0 - i0, 0):max(k2 - i0, 0)] = False
+            n, lab, stats, _ = cv2.connectedComponentsWithStats(ink.astype(np.uint8), connectivity=8)
+            ok = np.zeros(n, bool)
+            for k in range(1, n):
+                x0, y0, ww, hh = stats[k, :4]
+                touches = x0 == 0 or y0 == 0 or x0 + ww >= w or y0 + hh >= h
+                ok[k] = o.get('edge', False) or not touches
+            return dist, ok[lab], lab, stats, ok
+
+        bg = np.array(o['bg'], float) if 'bg' in o else modal_color(inR.reshape(-1, 3))
+        dist, text, lab, stats, ok = find_ink(bg)
+        if 'bg' not in o and text.any():
+            t8 = text.astype(np.uint8)
+            ring = (cv2.dilate(t8, np.ones((9, 9), np.uint8)) > 0) & ~(cv2.dilate(t8, np.ones((3, 3), np.uint8)) > 0)
+            if ring.sum() > 20:
+                bg = modal_color(inR[ring])            # the background right around the glyphs
+                dist, text, lab, stats, ok = find_ink(bg)
+        big = np.zeros_like(text)
+        for k in np.nonzero(ok)[0]:
+            if stats[k, cv2.CC_STAT_AREA] >= o.get('speck', 4):
+                big |= lab == k
+        if not big.any():
+            report.append('p%d LABEL NO INK: %s' % (pno, eng))
+            continue
+        ys, xs = np.nonzero(big)
+        T = fitz.Rect(ir.x0 + (i0 + xs.min()) / sx, ir.y0 + (j0 + ys.min()) / sy,
+                      ir.x0 + (i0 + xs.max() + 1) / sx, ir.y0 + (j0 + ys.max() + 1) / sy)
+        dd = dist[big]
+        col = np.median(inR[big][dd >= np.percentile(dd, 70)], axis=0)
+        M = 6
+        ci0, cj0 = max(i0 - M, 0), max(j0 - M, 0)
+        ci1, cj1 = min(i1 + M, A.shape[1]), min(j1 + M, A.shape[0])
+        mask = np.zeros((cj1 - cj0, ci1 - ci0), np.uint8)
+        mask[j0 - cj0:j1 - cj0, i0 - ci0:i1 - ci0][text] = 255
+        pad = o.get('pad', 3)
+        mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * pad + 1, 2 * pad + 1)))
+        Wsub = W[cj0:cj1, ci0:ci1]
+        if o.get('flat') or 'fill' in o:
+            Wsub[mask > 0] = np.clip(np.array(o.get('fill', bg)), 0, 255).astype(np.uint8)
+        else:
+            out = cv2.inpaint(np.ascontiguousarray(Wsub[:, :, ::-1]), mask, o.get('radius', 4), cv2.INPAINT_TELEA)
+            Wsub[:] = out[:, :, ::-1]
+        ys2, xs2 = np.nonzero(mask)
+        patches.append((x, (max(ci0 + xs2.min() - 1, 0), max(cj0 + ys2.min() - 1, 0),
+                            min(ci0 + xs2.max() + 2, A.shape[1]), min(cj0 + ys2.max() + 2, A.shape[0]))))
+        texts.append(dict(T=T, eng=eng, o=o, color=tuple(col / 255.0)))
+        report.append('p%d LABEL %-28s ink (%.1f,%.1f)-(%.1f,%.1f) h=%.1f w=%.1f col #%02x%02x%02x bg #%02x%02x%02x' % (
+            pno, eng.replace('\n', '/')[:28], T.x0, T.y0, T.x1, T.y1, T.height, T.width,
+            *[int(v) for v in col], *[int(v) for v in bg]))
+    for x, (a0, b0, a1, b1) in patches:
+        A, W, ir = work[x]
+        sx, sy = A.shape[1] / ir.width, A.shape[0] / ir.height
+        rr = fitz.Rect(ir.x0 + a0 / sx, ir.y0 + b0 / sy, ir.x0 + a1 / sx, ir.y0 + b1 / sy)
+        ok, buf = cv2.imencode('.png', np.ascontiguousarray(W[b0:b1, a0:a1, ::-1]))
+        page.insert_image(rr, stream=buf.tobytes(), keep_proportion=False)
+        regions.append(rr)
+    for t in texts:
+        regions += draw_label(page, pno, t, report)
+    return regions
+
+
+def draw_label(page, pno, t, report):
+    T, o = t['T'], t['o']
+    rot = o.get('rot', 0)
+    base = o.get('font') or ('MGB' if o.get('bold') else 'MG')
+    color = o.get('color', t['color'])
+    if isinstance(color, int):
+        color = rgb(color)
+    size = o.get('size', (T.width if rot else T.height) / 0.94)
+    lines = t['eng'].split('\n')
+    runs_l = []
+    for ln in lines:
+        runs, missing = runs_for(parse(ln, base), size)
+        if missing:
+            report.append('p%d MISSING GLYPHS %r in label: %s' % (pno, ''.join(sorted(missing)), ln))
+        runs_l.append(runs)
+    ws = [runs_width(r) for r in runs_l]
+    f = 1.0
+    if 'maxw' in o and max(ws) > o['maxw']:
+        f = o['maxw'] / max(ws)
+    runs_l = [scale_runs(r, f) for r in runs_l]
+    ws = [w * f for w in ws]
+    size *= f
+    lh = o.get('lh', 1.2) * size
+    n = len(lines)
+    cx = (T.x0 + T.x1) / 2 + o.get('dx', 0)
+    cy = (T.y0 + T.y1) / 2 + o.get('dy', 0)
+    al = o.get('align', 'center')
+    rects = []
+    for k, (runs, w) in enumerate(zip(runs_l, ws)):
+        y = cy - (n - 1) * lh / 2 + k * lh + 0.35 * size
+        if rot:
+            x = cx - w / 2
+        else:
+            x = {'center': cx - w / 2, 'left': T.x0 + o.get('dx', 0), 'right': T.x1 + o.get('dx', 0) - w}[al]
+        tw = fitz.TextWriter(page.rect, color=color)
+        xx = x
+        for tt, kk, fs, dy in runs:
+            tw.append((xx, y + dy), tt, font=FONTS[kk], fontsize=fs)
+            xx += FONTS[kk].text_length(tt, fontsize=fs)
+        if rot:
+            tw.write_text(page, morph=(fitz.Point(cx, cy), fitz.Matrix(rot)))
+            rects.append(fitz.Rect(cx - 0.7 * size, cy - w / 2, cx + 0.7 * size, cy + w / 2))
+        else:
+            tw.write_text(page)
+            rects.append(fitz.Rect(x, y - 0.9 * size, x + w, y + 0.3 * size))
+    return rects
+
+
 # ----------------------------------------------------------------- main build
 def build(spec):
     src = fitz.open(spec.SRC)
@@ -235,6 +426,9 @@ def build(spec):
     for items in spec.PAGES.values():
         for it in items:
             allchars |= chars_of(it[1])
+    for items in getattr(spec, 'LABELS', {}).values():
+        for it in items:
+            allchars |= chars_of(it[1].replace('\n', ''))
     build_fonts(allchars)
     report, diff_regions = [], {}
     for pno in range(1, doc.page_count + 1):
@@ -388,6 +582,8 @@ def build(spec):
             if nr.x1 > cfg['RIGHT_MARGIN'] + 1:
                 report.append('p%d PAST MARGIN: %s' % (pno, j['eng'][:50]))
         diff_regions[pno] = [fitz.Rect(s['bbox']) for j in jobs for s in j['spans']] + [nr for nr, _ in drawn]
+        if pno in getattr(spec, 'LABELS', {}):
+            diff_regions[pno] += do_labels(src, page, pno, spec.LABELS[pno], report)
     doc.subset_fonts()
     doc.save(spec.OUT, garbage=4, deflate=True)
     doc.close()
