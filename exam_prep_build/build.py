@@ -13,6 +13,10 @@ from tex2mml import convert_html
 BASE = pathlib.Path(__file__).parent
 CONTENT = BASE / 'content'
 OUT = BASE.parent / 'Exam Prep Notes (Lectures 1-7).pdf'
+# document title / subject written into the HTML and the PDF metadata (variants override these)
+TITLE = 'Intelligent Robot Practice — Exam Prep Notes (Lectures 1–7)'
+SUBJECT = ('Exam preparation notes: modeling, calibration, odometry, Kalman filters, EKF/UKF, '
+           'pose graphs, optimization')
 
 # (file, chapter key, TOC number label, accent var)
 CHAPTERS = [
@@ -162,8 +166,8 @@ def assemble(toc, parts, pages):
     body = cover + front + '\n'.join(parts)
     body = convert_html(body)
     return ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
-            '<title>Intelligent Robot Practice — Exam Prep Notes (Lectures 1–7)</title>'
-            '<style>%s</style></head><body>%s</body></html>' % (css, body))
+            '<title>%s</title>'
+            '<style>%s</style></head><body>%s</body></html>' % (htmlmod.escape(TITLE), css, body))
 
 
 def render(html_text, out_pdf):
@@ -217,8 +221,7 @@ def fix_outline(pdf_path, titles):
             pretty = titles[max(cands, key=len)] if cands else title
         toc.append([lvl, pretty, page])
     doc.set_toc(toc)
-    doc.set_metadata({'title': 'Intelligent Robot Practice — Exam Prep Notes (Lectures 1–7)',
-                      'subject': 'Exam preparation notes: modeling, calibration, odometry, Kalman filters, EKF/UKF, pose graphs, optimization',
+    doc.set_metadata({'title': TITLE, 'subject': SUBJECT,
                       'creator': 'Chromium via Playwright', 'producer': 'PyMuPDF'})
     tmp = pathlib.Path(str(pdf_path) + '.tmp')
     doc.save(str(tmp), garbage=3, deflate=True)

@@ -1,0 +1,552 @@
+<section class="chapter l9" id="ch-l9">
+<header class="ch-head">
+  <div class="ch-bignum">09</div>
+  <div class="ch-kicker">Lecture 9 · Local planning</div>
+  <h1>Local trajectory planning</h1>
+  <p class="ch-sub">How the car turns a reference path into a short, drivable, collision-free trajectory: describe everything relative to the path (Frenet coordinates), generate a handful of candidate trajectories, convert them to x–y, throw out the unsafe or undrivable ones and pick the cheapest — then do it all again a fraction of a second later.</p>
+</header>
+<div class="glance">
+  <div><div class="gh">After this chapter you can</div><ul>
+    <li>describe a position by <b>path distance s</b> and <b>lateral offset d</b>, and convert both ways</li>
+    <li>build a <b>quintic</b> lateral trajectory from six boundary conditions and solve for its coefficients</li>
+    <li>combine longitudinal and lateral plans into <b>candidates</b> and map them to x–y</li>
+    <li>compute velocity, acceleration, speed, direction and <b>curvature</b> of a candidate from Frenet quantities</li>
+    <li>check candidates for <b>collisions</b> with covering circles and against the <b>vehicle limits</b></li>
+    <li>normalize and weight <b>costs</b> to select the final trajectory</li>
+    <li>name the other ways to generate candidates and explain <b>receding-horizon</b> planning</li>
+  </ul></div>
+  <div><div class="gh">Slide map</div><ul class="slidemap">
+    <li><span>Overview: candidates, collision check</span><span class="sl">s1</span></li>
+    <li><span>Arc length, tangent, left normal</span><span class="sl">s2–4</span></li>
+    <li><span>Frenet coordinates both ways</span><span class="sl">s5–6</span></li>
+    <li><span>Trajectories in time, quintic plans</span><span class="sl">s7–9</span></li>
+    <li><span>Combining plans into candidates</span><span class="sl">s10</span></li>
+    <li><span>Curvature, velocity, acceleration</span><span class="sl">s11–13</span></li>
+    <li><span>Back to x–y, candidate curvature</span><span class="sl">s14–15</span></li>
+    <li><span>Collision check, vehicle limits, cost</span><span class="sl">s16–18</span></li>
+    <li><span>Generate–Evaluate–Select</span><span class="sl">s19</span></li>
+    <li><span>Other generators, receding horizon</span><span class="sl">s20–24</span></li>
+  </ul></div>
+</div>
+
+<h2>The big picture</h2>
+<div class="co intuition" data-t="In plain English"><p>The global planner of Lecture 8 hands over a route — a line through the map. It does not say how to pass a parked car, how fast to drive or how to stay comfortable. The <b>local planner</b> looks a few seconds ahead (4 s on the slides) and produces a <b>trajectory</b>: not just where the car should go, but where it should be at every instant. The recipe of this lecture is <b>generate, evaluate, select</b>: make a handful of candidate trajectories, discard those that collide or that the car cannot drive, and pick the cheapest of the rest. The car executes only the first fraction of it, then the whole thing is repeated from the new state.</p></div>
+<div class="co key"><p><b>Path vs trajectory.</b> A path is a curve in space — <em>where</em>. A trajectory is a path with timing — <em>where and when</em>, written $\mathbf{p}(t)$. Two cars can follow the same path with different trajectories (one brakes, one speeds up), and only one of them may hit the pedestrian.</p></div>
+<p>Slide 1 shows the whole lecture in one picture: from the current vehicle, several candidate trajectories fan out; the ones that run into the obstacle on the reference path are rejected, and the selected trajectory changes lane smoothly. The two tools behind it are named on the slide: combine longitudinal and lateral plans into candidates, then convert them to Cartesian (x–y) trajectories and check them for collisions.</p>
+<figure class="fig"><div class="panel"><img src="fig/l9_overview.svg" alt=""></div>
+<figcaption>Where the lecture sits. Plan(c, g, π) is this lecture; the controller that tracks the selected trajectory τ* is the next one (slide 24).</figcaption></figure>
+
+<h2>Arc length and the reference path</h2>
+<div class="co intuition" data-t="In plain English"><p>Lay a tape measure along the road. The reading on the tape, $s$, is the distance driven along the path from its start point ($s = 0$). Every reading names exactly one point on the path, the <b>reference point</b> $\mathbf{r}(s)$. So instead of "the point at x = 10, y = 2.7" you can say "the point 10.47 m down the road".</p></div>
+$$\mathbf{r}(s) = \begin{bmatrix} x_r(s) \\ y_r(s) \end{bmatrix}$$
+<ul>
+<li>$s$ is the <b>arc length</b>: distance measured along the curve, not the straight-line distance from the start.</li>
+<li>The position vector $\mathbf{r}(s)$ is written in the <b>global</b> frame (the map's x–y axes).</li>
+<li>Using arc length as the parameter has one big advantage: changing the parameter by $\Delta s$ moves you exactly $\Delta s$ metres along the road. That is what makes the tangent of the next section a unit vector.</li>
+</ul>
+<div class="co example" data-t="Extra example · the running example of these notes">
+<p>A left-turning circular path of radius $R = 20$ m starts at the origin heading along +x. Its centre is at $(0, 20)$, and after $s$ metres the path has turned by the angle $s/R$:</p>
+$$\mathbf{r}(s) = \begin{bmatrix} R\sin(s/R) \\ R - R\cos(s/R) \end{bmatrix}$$
+<p>At $s = 10\pi/3 \approx 10.47$ m the angle is $s/R = 0.5236$ rad $= 30°$, so $\mathbf{r} = (20 \sin 30°,\ 20 - 20\cos 30°) = (10,\ 2.68)$ m. This point is used again in the next sections.</p>
+</div>
+
+<h2>The unit tangent</h2>
+<div class="co intuition" data-t="In plain English"><p>Take two nearby points on the path, $\mathbf{r}(s)$ and $\mathbf{r}(s + \Delta s)$. The arrow between them, $\Delta\mathbf{r}$, points roughly along the road. Now shrink $\Delta s$: the arrow turns until it lies exactly along the road, and its length becomes equal to $\Delta s$ (the chord becomes the arc). Dividing by $\Delta s$ therefore leaves an arrow of length 1 pointing in the direction of travel — the <b>unit tangent</b>.</p></div>
+$$\mathbf{t}(s) = \frac{d\mathbf{r}(s)}{ds} = \lim_{\Delta s \to 0} \frac{\Delta\mathbf{r}}{\Delta s}, \qquad \Delta\mathbf{r} = \mathbf{r}(s + \Delta s) - \mathbf{r}(s), \qquad \|\mathbf{t}(s)\| = 1$$
+<p>The two bullets of slide 3 are exactly the two facts in the box: as the gap shrinks, the direction of $\Delta\mathbf{r}$ converges to the tangent, and the ratio of chord length to arc length converges to 1. Condition: a smooth path, with arc length as the distance variable.</p>
+<div class="co example" data-t="Worked example · slide 3 in numbers (R = 20 m circle)">
+<p>On a circle the chord for an arc $\Delta s$ is $2R\sin(\Delta s / 2R)$, and it makes the angle $\Delta s/2R$ with the tangent at the start point.</p>
+<table class="tbl compact">
+<tr><th>Arc Δs</th><th class="num">Chord ‖Δr‖</th><th class="num">Chord / arc</th><th class="num">Angle to tangent</th></tr>
+<tr><td>10 m</td><td class="num">9.896 m</td><td class="num">0.9896</td><td class="num">14.3°</td></tr>
+<tr><td>5 m</td><td class="num">4.987 m</td><td class="num">0.9974</td><td class="num">7.2°</td></tr>
+<tr><td>2 m</td><td class="num">1.9992 m</td><td class="num">0.99958</td><td class="num">2.9°</td></tr>
+<tr><td>0.5 m</td><td class="num">0.49999 m</td><td class="num">0.99997</td><td class="num">0.7°</td></tr>
+</table>
+<p>Differentiating the circle directly: $\mathbf{t}(s) = (\cos(s/R),\ \sin(s/R))$. At $s = 10.47$ m: $\mathbf{t} = (0.866,\ 0.5)$, and $\|\mathbf{t}\| = \sqrt{0.75 + 0.25} = 1$ ✓.</p>
+</div>
+<div class="co pitfall"><p>If a curve is described by some other parameter $u$ (time, or the parameter of a Bézier curve), $d\mathbf{r}/du$ still points along the curve but its length is not 1. Then you must normalize: $\mathbf{t} = \mathbf{r}'(u) / \|\mathbf{r}'(u)\|$. Only the arc-length parameter gives a unit tangent for free.</p></div>
+
+<h2>Tangent and left normal</h2>
+<div class="co intuition" data-t="In plain English"><p>The tangent means "forward". Turn it 90° counterclockwise and you get "left": the <b>left normal</b> $\mathbf{n}$. Together they form a small coordinate frame that rides along the road — forward and left at every point, perpendicular to each other, both of length 1.</p></div>
+$$\mathbf{t}(s) = \begin{bmatrix} t_x(s) \\ t_y(s) \end{bmatrix}, \qquad \mathbf{n}(s) = \begin{bmatrix} -t_y(s) \\ t_x(s) \end{bmatrix}$$
+<p>Rotating any vector $(a, b)$ by +90° gives $(-b, a)$. So $\mathbf{t}^T\mathbf{n} = -t_x t_y + t_y t_x = 0$ and $\|\mathbf{n}\| = \|\mathbf{t}\| = 1$. The pair $(\mathbf{t}, \mathbf{n})$ is ordered like the x- and y-axes, so the frame is right-handed.</p>
+<div class="co example" data-t="Worked example · slide 4 at the running point">
+<p>At $s = 10.47$ m on the circle, $\mathbf{t} = (0.866, 0.5)$, so $\mathbf{n} = (-0.5,\ 0.866)$. Check: $\mathbf{t}^T\mathbf{n} = -0.433 + 0.433 = 0$ ✓. The normal points toward the centre of the circle — on a left turn, "left" is the inside of the bend.</p>
+</div>
+<div class="co pitfall"><p>The sign convention matters. $(t_y, -t_x)$ is the <em>right</em> normal; with it every lateral offset $d$ would flip sign. The lecture uses the left normal, so <b>d &gt; 0 means left of the path, d &lt; 0 right</b> (slide 5).</p></div>
+
+<h2>Frenet coordinates: from (s, d) to a position</h2>
+<div class="co intuition" data-t="In plain English"><p>To say where the car is, give two numbers instead of x and y: how far along the road it is ($s$) and how far to the left of the path ($d$). To get back to x–y: walk to the reference point $\mathbf{r}(s)$, then step sideways by $d$ along the normal.</p></div>
+$$\mathbf{p} = \mathbf{r}(s) + d\,\mathbf{n}(s)$$
+<p>$(s, d)$ are the <b>Frenet coordinates</b> of the point $\mathbf{p}$: $s$ is the path distance and $d$ the lateral offset (left positive, right negative). The path distance fixes the reference point; the offset moves away from it along the normal.</p>
+<figure class="fig"><div class="panel"><img src="fig/l9_frenet.svg" alt="" style="max-width:82%"></div>
+<figcaption>The Frenet frame rides along the path. Lines of constant $d$ are parallel to the road (lane lines); lines of constant $s$ are the normals.</figcaption></figure>
+<div class="co example" data-t="Worked example · slide 5 at the running point">
+<p>$(s, d) = (10.47, 1.5)$ on the $R = 20$ m circle: $\mathbf{r} = (10, 2.679)$ and $\mathbf{n} = (-0.5, 0.866)$, so</p>
+$$\mathbf{p} = (10 - 1.5 \cdot 0.5,\ \ 2.679 + 1.5 \cdot 0.866) = (9.25,\ 3.978)$$
+<p>Check: the distance from the centre $(0, 20)$ is 18.5 m $= R - d$. A positive offset on a left curve lies on the inside of the bend, as it should.</p>
+</div>
+<div class="co key"><p>Why bother? In Frenet coordinates the road is straight: a lane is "constant $d$", keeping the lane is "hold $d$", a lane change is "move $d$ from 0 to ±3.5 m" and driving on is "increase $s$". The curvature of the road drops out of the planning problem and only comes back when the result is converted to x–y.</p></div>
+<div class="co pitfall"><p>Slide 5's condition: this works only near the path, where every point has a single reference point. On the inside of a curve, a point at the centre of curvature ($d = R$) is equally close to every point of the arc, and beyond it the description breaks down.</p></div>
+
+<h2>From a position back to (s, d)</h2>
+<div class="co intuition" data-t="In plain English"><p>Going back is a search: find the point of the path nearest to the car — that gives $s^*$ — then measure how far the car is from that point along the normal, keeping the sign — that gives $d$.</p></div>
+$$s^* = \argmin_{s} \|\mathbf{p} - \mathbf{r}(s)\|^2, \qquad d = \big(\mathbf{p} - \mathbf{r}(s^*)\big)^T \mathbf{n}(s^*)$$
+<p>Minimizing the squared distance is the same as minimizing the distance, and it is smoother to differentiate. At the minimum the derivative vanishes: $\frac{d}{ds}\|\mathbf{p} - \mathbf{r}(s)\|^2 = -2(\mathbf{p} - \mathbf{r}(s))^T\mathbf{t}(s) = 0$. So the vector from the nearest point to the car is perpendicular to the tangent — it lies along the normal — and $\mathbf{p} - \mathbf{r}(s^*) = d\,\mathbf{n}(s^*)$ exactly. The projection undoes slide 5; dotting with $\mathbf{n}$ gives the distance and its sign in one step.</p>
+<div class="co example" data-t="Worked example · slide 6 on a straight path">
+<p>A straight path through the origin at 30°: $\mathbf{r}(s) = s\,\mathbf{t}$ with $\mathbf{t} = (0.866, 0.5)$ and $\mathbf{n} = (-0.5, 0.866)$. For the car at $\mathbf{p} = (8, 6)$:</p>
+<ol class="steps">
+<li>Nearest point: $s^* = \mathbf{p}^T\mathbf{t} = 8(0.866) + 6(0.5) = 9.93$ m.</li>
+<li>Offset: $d = \mathbf{p}^T\mathbf{n} = 8(-0.5) + 6(0.866) = 1.20$ m — positive, so left of the path.</li>
+</ol>
+</div>
+<div class="co example" data-t="Worked example · slide 6 on the R = 20 m circle">
+<p>For $\mathbf{p} = (12, 6)$ the nearest point lies on the line from the centre $\mathbf{c} = (0, 20)$ through $\mathbf{p}$. $\|\mathbf{p} - \mathbf{c}\| = \sqrt{12^2 + 14^2} = 18.44$ m, so the nearest point is $\mathbf{r}^* = \mathbf{c} + 20\,(12, -14)/18.44 = (13.02,\ 4.81)$. It is $40.6°$ (0.7086 rad) around the circle, so $s^* = 20 \times 0.7086 = 14.17$ m and $d = R - \|\mathbf{p} - \mathbf{c}\| = 20 - 18.44 = 1.56$ m (inside, left).</p>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l9_projection.svg" alt=""></div>
+<figcaption>The two examples. The connecting segment is always perpendicular to the path. At the centre of curvature every point of the circle is equally near, so $s^*$ is not unique.</figcaption></figure>
+<div class="co pitfall" data-t="Watch out · uniqueness"><p>Slide 6's condition: there must be exactly one closest point inside a smooth path. It fails at the centre of curvature and near hairpins, where two separate stretches of road are equally close — the projection can jump from one to the other. Planners search only near the previous $s^*$ (warm start) and keep $\left|d\right|$ well below the curve radius.</p></div>
+<div class="co tip"><p>In code, $s^*$ is found numerically: sample the path, take the closest sample, then refine with a few Newton steps on $(\mathbf{p} - \mathbf{r}(s))^T\mathbf{t}(s) = 0$. On exams, expect a straight path (one dot product each for $s$ and $d$) or a circle (project along the radius).</p></div>
+
+<h2>Trajectories as functions of time</h2>
+<div class="co intuition" data-t="In plain English"><p>A trajectory says where the car is at every instant. In Frenet terms that is just two ordinary functions of time: $s(t)$, the progress along the road, and $d(t)$, the sideways position. Put them into the slide-5 formula and you have the x–y trajectory.</p></div>
+$$\mathbf{p}(t) = \mathbf{r}\big(s(t)\big) + d(t)\,\mathbf{n}\big(s(t)\big)$$
+<p>On slide 7, dots of the same colour mark the same instant in all three plots, and the dots are equally spaced in time; the dashed connectors show the offset along the normal. Planning $s(t)$ and $d(t)$ separately is the main simplification of the method: the speed decision (longitudinal) and the steering decision (lateral) become two one-dimensional problems, which slide 10 then combines.</p>
+
+<h2>Boundary conditions of the lateral plan</h2>
+<div class="co intuition" data-t="In plain English"><p>A lane change must start from exactly where the car is now — its current sideways position, sideways speed and sideways acceleration — or the steering command would jump. It must end at the target offset and settle there: no sideways speed and no sideways acceleration left at the end. That is three conditions at each end, six in all.</p></div>
+$$\text{start: } d(0) = d_0,\quad \dot d(0) = \dot d_0,\quad \ddot d(0) = \ddot d_0 \qquad\quad \text{end: } d(T) = d_{goal},\quad \dot d(T) = 0,\quad \ddot d(T) = 0$$
+<p>Dots are time derivatives: $\dot d$ is the lateral velocity and $\ddot d$ the lateral acceleration. The figure on slide 8 starts at rest on the path ($d_0 = \dot d_0 = \ddot d_0 = 0$) and holds the target value $d_{goal}$ after $T$.</p>
+<div class="co key"><p><b>Six conditions need six coefficients: a quintic (degree 5).</b> A cubic has only four coefficients — it can match position and velocity at both ends but not acceleration, so the lateral acceleration (and with it the steering) would jump at the start or the end.</p></div>
+
+<h2>Solving the quintic</h2>
+<div class="co intuition" data-t="In plain English"><p>The first three coefficients come for free from the start conditions, because at $t = 0$ every term containing $t$ vanishes. The three end conditions then give three linear equations in the three remaining coefficients.</p></div>
+$$d(t) = a_0 + a_1 t + a_2 t^2 + a_3 t^3 + a_4 t^4 + a_5 t^5$$
+$$\dot d(t) = a_1 + 2a_2 t + 3a_3 t^2 + 4a_4 t^3 + 5a_5 t^4, \qquad \ddot d(t) = 2a_2 + 6a_3 t + 12a_4 t^2 + 20a_5 t^3$$
+<p><b>Step 1 — start conditions:</b> $a_0 = d_0$, $a_1 = \dot d_0$, $a_2 = \ddot d_0 / 2$.</p>
+<p><b>Steps 2 and 3 — substitute the end conditions and solve:</b></p>
+$$\begin{bmatrix} T^3 & T^4 & T^5 \\ 3T^2 & 4T^3 & 5T^4 \\ 6T & 12T^2 & 20T^3 \end{bmatrix} \begin{bmatrix} a_3 \\ a_4 \\ a_5 \end{bmatrix} = \begin{bmatrix} d_{goal} - a_0 - a_1 T - a_2 T^2 \\ -a_1 - 2a_2 T \\ -2a_2 \end{bmatrix}$$
+<p>The determinant of the matrix is $2T^9$, so for every $T > 0$ there is exactly one solution — the method never fails, whatever the initial state.</p>
+<div class="co example" data-t="Worked example · slides 8–9 (start at rest, target 2 m, T = 4 s)">
+<p>$a_0 = a_1 = a_2 = 0$, so the right-hand side is $(2, 0, 0)$:</p>
+$$64a_3 + 256a_4 + 1024a_5 = 2, \qquad 48a_3 + 256a_4 + 1280a_5 = 0, \qquad 24a_3 + 192a_4 + 1280a_5 = 0$$
+<p>Solution: $a_3 = 0.3125$, $a_4 = -0.1172$, $a_5 = 0.01172$. For a start at rest there is a shortcut, with $D = d_{goal} - d_0$:</p>
+$$a_3 = \frac{10D}{T^3},\quad a_4 = -\frac{15D}{T^4},\quad a_5 = \frac{6D}{T^5} \quad\Longleftrightarrow\quad d(t) = D\,(10u^3 - 15u^4 + 6u^5),\ \ u = t/T$$
+<p>Values: $d(1) = 0.207$, $d(2) = 1.000$, $d(3) = 1.793$ m — the curve passes the half-way point exactly at $T/2$ and is symmetric about it. Peak lateral speed: 0.9375 m/s at $t = 2$ s ($= 1.875\,D/T$). Peak lateral acceleration: 0.722 m/s² at $t = 0.85$ s ($= 5.774\,D/T^2$).</p>
+</div>
+<div class="co example split" data-t="Worked example · slide 9's note: the initial state need not be zero">
+<p>The car is at $d_0 = 0.5$ m, still drifting left at $\dot d_0 = 0.4$ m/s with $\ddot d_0 = -0.2$ m/s², and should return to the path ($d_{goal} = 0$) in $T = 3$ s.</p>
+<ol class="steps">
+<li>Start: $a_0 = 0.5$, $a_1 = 0.4$, $a_2 = -0.1$.</li>
+<li>Right-hand side: $0 - 0.5 - 0.4(3) + 0.1(9) = -0.8$; $\ -0.4 + 0.2(3) = 0.2$; $\ -2(-0.1) = 0.2$.</li>
+<li>Solve $\begin{bmatrix} 27 & 81 & 243 \\ 27 & 108 & 405 \\ 18 & 108 & 540 \end{bmatrix}\begin{bmatrix} a_3 \\ a_4 \\ a_5 \end{bmatrix} = \begin{bmatrix} -0.8 \\ 0.2 \\ 0.2 \end{bmatrix}$: $a_3 = -0.3519$, $a_4 = 0.1778$, $a_5 = -0.02346$.</li>
+</ol>
+<p>The car first keeps drifting (peak $d = 0.65$ m at $t = 0.65$ s) and then settles exactly on the path with zero lateral speed and acceleration. The same formula handles both cases — that is the point of slide 9's remark.</p>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l9_quintic.svg" alt=""></div>
+<figcaption>Position, velocity and acceleration of both examples. The six dots on each curve are the six boundary conditions.</figcaption></figure>
+<div class="co tip"><p>How the duration scales: peak lateral acceleration grows like $D/T^2$, jerk like $D/T^3$, and the jerk cost $\int \big(d^{(3)}\big)^2\,dt$ like $D^2/T^5$ (for a start at rest it equals $720D^2/T^5$). Halving $T$ makes the lateral acceleration 4 times and the jerk cost 32 times larger. This is why candidate sets include several durations.</p></div>
+
+<h2>Combining longitudinal and lateral plans</h2>
+<div class="co intuition" data-t="In plain English"><p>Instead of one plan, make a small menu: a few speed profiles $s_i(t)$ (slow down, speed up) and a few lateral profiles $d_j(t)$ (right 2 m, keep the path, left 2 m). Every pairing of one speed profile with one lateral profile is a candidate: 2 × 3 = 6.</p></div>
+$$\big(s_i(t),\ d_j(t)\big), \qquad i = 1, 2; \quad j = 1, 2, 3$$
+<p>On slide 10, colour marks the target lateral offset, line style and marker the longitudinal plan, and the markers are 1 s apart.</p>
+<div class="co example split" data-t="Worked example · the six candidates of slide 10, reconstructed">
+<p>The slide plots the plans but does not give their formulas. The plotted values match these plans exactly, so we use them:</p>
+<ul>
+<li><b>Longitudinal:</b> speed-keeping quartics from $v_0 = 5$ m/s with zero initial acceleration to an end speed of 3 m/s (decelerate) or 7 m/s (accelerate) with zero end acceleration, $T = 4$ s: $s(t) = 5t \mp 0.125t^3 \pm 0.015625t^4$. Positions at $t = 1, 2, 3, 4$ s: 4.89, 9.25, 12.89, <b>16</b> m (decel) and 5.11, 10.75, 17.11, <b>24</b> m (accel).</li>
+<li><b>Lateral:</b> the quintic $d(t) = D(10u^3 - 15u^4 + 6u^5)$ with $D = -2, 0, +2$ m and $T = 4$ s: $d = \pm 0.207, \pm 1, \pm 1.793, \pm 2$ m at $t = 1, 2, 3, 4$ s.</li>
+</ul>
+<p>Example: the candidate (accelerate, left 2 m) at $t = 2$ s is at $(s, d) = (10.75, 1.0)$, and at $t = 3$ s at $(17.11, 1.793)$.</p>
+<p class="small">Why a quartic for speed keeping? The start gives three conditions ($s$, $\dot s$, $\ddot s$), but at the end only speed and acceleration matter — where exactly the car is after 4 s is left free. Five conditions need five coefficients: degree 4.</p>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l9_candidates.svg" alt=""></div>
+<figcaption>Slide 10 rebuilt from the formulas above: 2 speed plans × 3 lateral plans = 6 candidates in the $(s, d)$ plane.</figcaption></figure>
+<div class="co beyond"><p>Real planners use bigger menus — for example 3 end speeds × 7 lateral offsets × 2 durations = 42 candidates — and the cost grows multiplicatively: every candidate has to be converted to x–y and checked at every time step (practice problem 7).</p></div>
+
+<h2>Curvature and how the basis turns</h2>
+<div class="co intuition" data-t="In plain English"><p>Along a curve the tangent keeps its length (1) but turns. <b>Curvature</b> measures how fast it turns per metre driven. A circle of radius $R$ turns through $2\pi$ over $2\pi R$ metres, so its curvature is $1/R$. As the tangent turns, its tip moves sideways — toward the normal — and the normal turns with it, its tip moving backwards along the tangent.</p></div>
+$$\kappa_r = \frac{d\theta_r}{ds}, \qquad \frac{d\mathbf{t}_r}{ds} = \kappa_r\,\mathbf{n}_r, \qquad \frac{d\mathbf{n}_r}{ds} = -\kappa_r\,\mathbf{t}_r, \qquad \Delta\mathbf{t}_r \approx \mathbf{n}_r\,\Delta\theta_r$$
+<p>The subscript $r$ marks quantities of the reference path; $p$ will mark the candidate trajectory. $\theta_r$ is the heading of the tangent. Sign: $\kappa_r > 0$ for a left turn, $\kappa_r < 0$ for a right turn, $0$ on a straight.</p>
+<div class="co example" data-t="Worked example · slide 11 on the running circle">
+<p>$R = 20$ m, so $\kappa_r = 1/20 = 0.05$ m⁻¹. With $\theta = s/R$: $\mathbf{t}_r = (\cos\theta, \sin\theta)$, so $\frac{d\mathbf{t}_r}{ds} = \frac{1}{R}(-\sin\theta, \cos\theta) = \kappa_r\mathbf{n}_r$ ✓, and $\frac{d\mathbf{n}_r}{ds} = \frac{1}{R}(-\cos\theta, -\sin\theta) = -\kappa_r\mathbf{t}_r$ ✓.</p>
+</div>
+
+<h2>Velocity in Frenet terms</h2>
+<div class="co intuition" data-t="In plain English"><p>The car's velocity has two parts: moving along the road (the reference point slides forward) and moving sideways (the offset changes). The along-part has a twist. When the car is offset from the path on a curve, the normal it rides on turns as the reference point moves, so the car's forward speed is $(1 - \kappa_r d)$ times the reference point's speed — less on the inside of a bend, more on the outside. The inside lane is simply shorter.</p></div>
+<p>Differentiate $\mathbf{p} = \mathbf{r} + d\,\mathbf{n}_r$ with respect to time (slide 12), using $\dot{\mathbf{r}} = \mathbf{t}_r\dot s$ and $\dot{\mathbf{n}}_r = \frac{d\mathbf{n}_r}{ds}\dot s = -\kappa_r\dot s\,\mathbf{t}_r$:</p>
+$$\dot{\mathbf{p}} = \mathbf{t}_r\dot s + \dot d\,\mathbf{n}_r + d\,\dot{\mathbf{n}}_r = (1 - \kappa_r d)\,\dot s\,\mathbf{t}_r + \dot d\,\mathbf{n}_r$$
+$$v_T = (1 - \kappa_r d)\,\dot s, \qquad v_N = \dot d$$
+<p>$v_T$ is the velocity component along the reference tangent and $v_N$ along the reference normal. The basis and the curvature are those of the current reference point; their argument $s(t)$ is omitted.</p>
+<div class="co example" data-t="Extra example · running numbers for slides 12–17">
+<p>On the $R = 20$ m left curve ($\kappa_r = 0.05$ m⁻¹) the car is at $d = 1.5$ m (inside), with $\dot s = 10$ m/s and $\dot d = 0.5$ m/s:</p>
+$$v_T = (1 - 0.05 \times 1.5) \times 10 = 0.925 \times 10 = 9.25 \text{ m/s}, \qquad v_N = 0.5 \text{ m/s}$$
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l9_inner_outer.svg" alt="" style="max-width:62%"></div>
+<figcaption>For the same $\Delta s = 10$ m on the reference, the inside offset ($d = +1.5$ m) travels $0.925 \times 10 = 9.25$ m and the outside one ($d = -1.5$ m) $1.075 \times 10 = 10.75$ m.</figcaption></figure>
+<div class="co pitfall"><p>When $d = 1/\kappa_r = R$, the factor $1 - \kappa_r d$ is zero: the car sits at the centre of curvature, and moving the reference point does not move the car at all. The Frenet description is singular there — the same breakdown as the uniqueness condition of slide 6. Keep $\kappa_r d < 1$.</p></div>
+
+<h2>Acceleration in Frenet terms</h2>
+<div class="co intuition" data-t="In plain English"><p>Differentiate once more. Two things change: the sizes of the velocity components ($\dot v_T$, $\dot v_N$), and the directions of the axes they are measured along (the basis turns at the rate $\kappa_r\dot s$). Slide 13 draws the two effects separately — first with the axes frozen, then with the components frozen — and adds them.</p></div>
+$$\ddot{\mathbf{p}} = \underbrace{\dot v_T\,\mathbf{t}_r + \dot v_N\,\mathbf{n}_r}_{\text{components change}} + \underbrace{v_T\,\dot{\mathbf{t}}_r + v_N\,\dot{\mathbf{n}}_r}_{\text{axes rotate}} = a_T\,\mathbf{t}_r + a_N\,\mathbf{n}_r, \qquad \dot{\mathbf{t}}_r = \kappa_r\dot s\,\mathbf{n}_r,\quad \dot{\mathbf{n}}_r = -\kappa_r\dot s\,\mathbf{t}_r$$
+$$a_T = \dot v_T - \kappa_r\dot s\,v_N = (1 - \kappa_r d)\,\ddot s - \kappa_r' d\,\dot s^2 - 2\kappa_r\dot s\,\dot d$$
+$$a_N = \dot v_N + \kappa_r\dot s\,v_T = \ddot d + \kappa_r(1 - \kappa_r d)\,\dot s^2$$
+<p>$\kappa_r' = d\kappa_r/ds$ is how fast the curvature changes along the road (non-zero in a transition curve, zero on a circle or a straight). Check $a_T$: $\dot v_T = (1 - \kappa_r d)\ddot s - (\kappa_r' \dot s\, d + \kappa_r\dot d)\,\dot s$; subtracting $\kappa_r\dot s\,v_N = \kappa_r\dot s\,\dot d$ gives the $-2\kappa_r\dot s\dot d$ term.</p>
+<ul>
+<li>On a straight ($\kappa_r = 0$) everything collapses to $a_T = \ddot s$ and $a_N = \ddot d$.</li>
+<li>$\kappa_r(1 - \kappa_r d)\dot s^2 = v_T^2/(R - d)$ is the <b>centripetal</b> acceleration of following the curve at offset $d$.</li>
+<li>$-2\kappa_r\dot s\,\dot d$ is a Coriolis-like term: moving sideways inside a rotating frame.</li>
+</ul>
+<div class="co example" data-t="Extra example · continuing the running numbers">
+<p>Add $\ddot s = 0.4$ m/s², $\ddot d = -0.2$ m/s² and $\kappa_r' = 0$ (circle):</p>
+$$a_T = 0.925(0.4) - 0 - 2(0.05)(10)(0.5) = 0.37 - 0.5 = -0.13 \text{ m/s}^2$$
+$$a_N = -0.2 + 0.05(0.925)(10^2) = -0.2 + 4.625 = 4.425 \text{ m/s}^2$$
+<p>The centripetal part checks out: $v_T^2/(R - d) = 9.25^2 / 18.5 = 4.625$ m/s². Although the reference point speeds up ($\ddot s > 0$), the car's tangential acceleration is negative — the sideways motion toward the inside eats it.</p>
+</div>
+
+<h2>Back to Cartesian: speed and direction</h2>
+<div class="co intuition" data-t="In plain English"><p>The collision checker and the controller work in x–y. The tangent and normal make the angle $\theta_r$ with the x-axis, so converting is just a rotation: the forward component points along $(\cos\theta_r, \sin\theta_r)$ and the sideways one along $(-\sin\theta_r, \cos\theta_r)$. The speed is the length of the velocity vector; the direction of travel is its angle.</p></div>
+$$\begin{bmatrix} \dot x \\ \dot y \end{bmatrix} = v_T\begin{bmatrix} \cos\theta_r \\ \sin\theta_r \end{bmatrix} + v_N\begin{bmatrix} -\sin\theta_r \\ \cos\theta_r \end{bmatrix}, \qquad \begin{bmatrix} \ddot x \\ \ddot y \end{bmatrix} = a_T\begin{bmatrix} \cos\theta_r \\ \sin\theta_r \end{bmatrix} + a_N\begin{bmatrix} -\sin\theta_r \\ \cos\theta_r \end{bmatrix}$$
+$$v = \|\dot{\mathbf{p}}\| = \sqrt{v_T^2 + v_N^2}, \qquad \theta_p = \atantwo(\dot y, \dot x) \quad (v > 0)$$
+<div class="co example" data-t="Extra example · slide 14 at the running point (reference heading 30°)">
+<p>$\dot x = 9.25(0.866) - 0.5(0.5) = 7.761$ m/s, $\ \dot y = 9.25(0.5) + 0.5(0.866) = 5.058$ m/s.</p>
+<p>$v = \sqrt{9.25^2 + 0.5^2} = \sqrt{85.81} = 9.264$ m/s and $\theta_p = \atantwo(5.058, 7.761) = 33.09°$ — the reference heading 30° plus $\arctan(v_N/v_T) = 3.09°$, because the car is also moving sideways.</p>
+<p>Accelerations: $\ddot x = -0.13(0.866) - 4.425(0.5) = -2.325$ m/s², $\ \ddot y = -0.13(0.5) + 4.425(0.866) = 3.767$ m/s².</p>
+</div>
+<div class="co pitfall"><p>Use atan2, not arctan of the ratio — arctan cannot tell driving north-east from driving south-west. The direction of travel is undefined at a standstill ($v = 0$). Using $\theta_p$ as the <em>body</em> heading assumes forward driving and no side slip (slide 14): when reversing it is off by 180°, and a sliding car points somewhere else than it moves.</p></div>
+
+<h2>Curvature and acceleration of a candidate</h2>
+<div class="co intuition" data-t="In plain English"><p>The curvature of a candidate is how fast its direction of travel turns per metre travelled. Its acceleration splits into a part along the motion — speeding up or slowing down, $a_\parallel$ — and a part across it — turning, $a_\perp = v^2\kappa_p$. These two are what the vehicle limits and passenger comfort depend on.</p></div>
+$$\kappa_p = \frac{d\theta_p}{d\ell} = \frac{\dot\theta_p}{v} = \frac{\dot x\ddot y - \dot y\ddot x}{(\dot x^2 + \dot y^2)^{3/2}} = \frac{v_T a_N - v_N a_T}{(v_T^2 + v_N^2)^{3/2}}, \qquad \frac{d\ell}{dt} = v$$
+$$a_\parallel = \dot v = \frac{v_T a_T + v_N a_N}{v}, \qquad a_\perp = v^2\kappa_p \qquad (v > 0)$$
+<p>$\ell$ is the distance travelled along the candidate itself (not along the reference). The Frenet form of $\kappa_p$ follows from the Cartesian one because a rotation does not change cross products or lengths: $\dot x\ddot y - \dot y\ddot x = v_T a_N - v_N a_T$ and $\dot x^2 + \dot y^2 = v_T^2 + v_N^2$. In the same way $a_\parallel$ and $a_\perp$ are just the acceleration expressed in the candidate's own frame $(\mathbf{t}_p, \mathbf{n}_p)$, which is the reference frame rotated by $\theta_p - \theta_r$.</p>
+<div class="co example" data-t="Extra example · slide 15 at the running point">
+$$\kappa_p = \frac{9.25(4.425) - 0.5(-0.13)}{(9.25^2 + 0.5^2)^{3/2}} = \frac{40.931 + 0.065}{794.9} = 0.0516 \text{ m}^{-1} \quad (\text{radius } 19.4 \text{ m})$$
+<p>Cartesian check: $(7.761 \times 3.767 - 5.058 \times (-2.325)) / 9.264^3 = (29.24 + 11.76)/794.9 = 0.0516$ ✓.</p>
+$$a_\parallel = \frac{9.25(-0.13) + 0.5(4.425)}{9.264} = \frac{-1.2025 + 2.2125}{9.264} = 0.109 \text{ m/s}^2$$
+$$a_\perp = v^2\kappa_p = 85.81 \times 0.0516 = 4.43 \text{ m/s}^2$$
+<p>Consistency: $a_\parallel^2 + a_\perp^2 = a_T^2 + a_N^2 = 19.6$ (m/s²)² — the same vector measured in two rotated frames. Note the sign change: along the reference tangent the car decelerates slightly ($a_T = -0.13$), along its own direction of travel it accelerates slightly ($a_\parallel = +0.11$).</p>
+</div>
+
+<h2>Collision checking with circles</h2>
+<div class="co intuition" data-t="In plain English"><p>Testing a rotated rectangle against obstacles at every time step is fiddly; testing circles is a single distance comparison. So cover the car with three overlapping circles and inflate the test: a collision happens when a circle centre gets closer to the obstacle centre than the two radii plus a safety margin. Repeat for every sampled time (every 0.01 s on the slide) and every candidate.</p></div>
+$$\|\mathbf{c}_k - \mathbf{o}\| \le r_k + r_{obs} + m \quad \Rightarrow \quad \text{collision}$$
+<p>$\mathbf{c}_k$, $\mathbf{o}$: centres of the $k$-th covering circle and of the obstacle; $r_k$, $r_{obs}$: their radii; $m$: extra safety margin. To cover an $L \times W$ body with $n$ circles, each circle must cover an $L/n \times W$ slice, so it needs the half-diagonal of that slice as its radius:</p>
+$$r_k = \sqrt{\Big(\frac{L}{2n}\Big)^2 + \Big(\frac{W}{2}\Big)^2}$$
+<div class="co example" data-t="Worked example · slide 16's numbers (car 4.5 × 1.8 m, margin 0.2 m)">
+<ol class="steps">
+<li>Three circles, slices of 1.5 m: $r_k = \sqrt{0.75^2 + 0.9^2} = 1.172$ m, centres at −1.5, 0 and +1.5 m along the body axis.</li>
+<li>With an obstacle of radius $r_{obs} = 0.5$ m, the threshold is $1.172 + 0.5 + 0.2 = 1.872$ m.</li>
+<li>Pose: car centre $(10, 0.5)$, heading 10°, obstacle at $(12.5, 1.6)$. Circle centres: $(8.52, 0.24)$, $(10, 0.5)$, $(11.48, 0.76)$. Distances to the obstacle: 4.20, 2.73 and <b>1.32</b> m.</li>
+<li>$1.32 \le 1.872$ → <b>collision</b> (through the front circle), so this candidate is rejected.</li>
+</ol>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l9_circles.svg" alt=""></div>
+<figcaption>Left: the three covering circles and their radius. Right: the example pose; only the front circle comes within the threshold.</figcaption></figure>
+<div class="co example" data-t="Worked example · slide 16's result: 4 of 6 candidates rejected">
+<div class="side wide-r">
+<p>Map the six slide-10 candidates to x–y along a left curve of radius 40 m and check them every 0.01 s against an obstacle at $s = 13$ m, $d = +1$ m (radius 0.5 m). The four candidates that end at $d = 0$ or $d = +2$ (rose) come as close as 0.31–1.00 m, below the 1.87 m threshold → rejected. The two right-2 m candidates (orange; solid accelerate, dashed decelerate) never come closer than 2.31 m and 2.77 m → they pass. This is exactly the "4 of 6 removed" of slide 16.</p>
+<figure class="fig" style="margin:0"><div class="panel"><img src="fig/l9_cartesian.svg" alt=""></div></figure>
+</div>
+</div>
+<div class="co pitfall" data-t="Watch out · circles are conservative"><p>The circles stick out beyond the body by $r_k - W/2 = 0.27$ m at the sides: their union covers about 10.8 m² against the body's 8.1 m². A candidate that would just fit through a gap can be rejected. More circles fit tighter but cost more checks.</p></div>
+<div class="co pitfall" data-t="Watch out · collisions between check times (slide 16, bottom)">
+<div class="side wide-r">
+<p>Checking only at sample instants can miss a collision that happens in between. At 20 m/s, a 0.01 s interval means 0.2 m between checks — fine; a 0.5 s interval means 10 m, enough to jump right over an obstacle. Fixes: shorten the interval, or check the whole swept segment between two samples (continuous collision checking).</p>
+<figure class="fig" style="margin:0"><div class="panel"><img src="fig/l9_tunnel.svg" alt=""></div></figure>
+</div></div>
+<div class="co beyond"><p>For moving obstacles, $\mathbf{o}$ becomes the predicted position $\mathbf{o}(t)$ of the other road user at the same instant $t$ — the collision check is done in space <em>and</em> time.</p></div>
+
+<h2>Vehicle limits</h2>
+<div class="co intuition" data-t="In plain English"><p>A collision-free candidate can still be impossible or unpleasant to drive: too fast, braking too hard, turning tighter than the steering allows, or turning so hard at speed that the tyres slide and the passengers are thrown sideways. Every candidate is checked against these limits over the whole planning horizon.</p></div>
+$$0 \le v \le v_{max}, \qquad a_{min} \le a_\parallel \le a_{max}, \qquad \left|a_\perp\right| = v^2\left|\kappa_p\right| \le a_{\perp,max}, \qquad \left|\kappa_p\right| \le \kappa_{max}$$
+<p>The last two combine into one speed-dependent curvature limit, $\left|\kappa_p\right| \le \min(\kappa_{max},\ a_{\perp,max}/v^2)$. The two branches meet at</p>
+$$v^* = \sqrt{\frac{a_{\perp,max}}{\kappa_{max}}}$$
+<p>Below $v^*$ the steering geometry is the binding limit ($\kappa_{max} = \tan\delta_{max}/L$ for the bicycle model of Lecture 2); above it, lateral acceleration (grip and comfort) binds and the allowed curvature falls like $1/v^2$ — the faster you go, the gentler the curves you may plan (slide 17).</p>
+<div class="co example" data-t="Extra example · checking the slide-15 candidate">
+<p>Limits: $a_{\perp,max} = 3$ m/s², $\kappa_{max} = 0.2$ m⁻¹ (minimum radius 5 m). Then $v^* = \sqrt{3/0.2} = \sqrt{15} = 3.87$ m/s.</p>
+<p>The running candidate has $v = 9.26$ m/s and $\kappa_p = 0.0516$ m⁻¹: $a_\perp = 85.81 \times 0.0516 = 4.43$ m/s² $> 3$ → <b>rejected</b>. At this speed the allowed curvature is $3/85.81 = 0.035$ m⁻¹ (radius ≥ 28.6 m). The same path would pass at $v \le \sqrt{3/0.0516} = 7.63$ m/s.</p>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l9_limits.svg" alt="" style="max-width:80%"></div>
+<figcaption>The allowed region of slide 17: flat at $\kappa_{max}$ up to $v^*$, then $a_{\perp,max}/v^2$.</figcaption></figure>
+<div class="co tip"><p>Slide 17's note: limit values depend on the vehicle's specifications and on which point of the car the trajectory describes (rear axle, centre of gravity…). A curvature limit for the rear-axle path is not the same number as for the front bumper path.</p></div>
+
+<h2>Choosing the final trajectory by cost</h2>
+<div class="co intuition" data-t="In plain English"><p>Usually several candidates survive the checks. To choose, give each one a score made of three parts: how jerky it is (comfort), how far its speed is from the desired speed (progress), and how far it ends from the preferred lateral position (staying in lane). Each part is divided by a typical value so that the parts are comparable, multiplied by an importance weight, and the parts are added. The lowest total wins.</p></div>
+$$J_j = \int_0^T \|\mathbf{j}(t)\|^2\,dt,\ \ \mathbf{j} = \frac{d\mathbf{a}}{dt}; \qquad J_v = \int_0^T e_v(t)^2\,dt,\ \ e_v = v - v_{ref}; \qquad J_d = e_d^2,\ \ e_d = d(T) - d_{goal}$$
+$$J = w_j\frac{J_j}{S_j} + w_v\frac{J_v}{S_v} + w_d\frac{J_d}{S_d}, \qquad \tau^* = \argmin_{\tau \in \mathcal{F}} J(\tau)$$
+<p>$\mathcal{F}$ is the set of candidates that passed every check. The scales $S_j, S_v, S_d$ remove the units (m²/s⁵, m²/s, m²) and the very different magnitudes, so the weights really express relative importance. In the cost, $d_{goal}$ is the <em>preferred</em> final offset (for example the lane centre) — not each candidate's own target, or $e_d$ would always be zero.</p>
+<div class="co example split" data-t="Extra example · selecting among the six slide-10 candidates">
+<p>Assume a straight road, desired speed $v_{ref} = 6$ m/s, preferred offset $d_{goal} = 0$, scales $S_j = 1$, $S_v = 10$, $S_d = 4$ and all weights 1.</p>
+<table class="tbl compact">
+<tr><th>Candidate</th><th class="num">J_j</th><th class="num">J_v</th><th class="num">J_d</th><th class="num">J</th><th>Checks</th></tr>
+<tr><td>decelerate, right 2 m</td><td class="num">3.56</td><td class="num">17.23</td><td class="num">4</td><td class="num">6.29</td><td>pass</td></tr>
+<tr><td>decelerate, keep</td><td class="num">0.75</td><td class="num">17.94</td><td class="num">0</td><td class="num">2.54</td><td>collision</td></tr>
+<tr><td>decelerate, left 2 m</td><td class="num">3.56</td><td class="num">17.23</td><td class="num">4</td><td class="num">6.29</td><td>collision</td></tr>
+<tr><td><b>accelerate, right 2 m</b></td><td class="num">3.56</td><td class="num">1.94</td><td class="num">4</td><td class="num"><b>4.76</b></td><td>pass</td></tr>
+<tr><td>accelerate, keep</td><td class="num">0.75</td><td class="num">1.94</td><td class="num">0</td><td class="num">0.94</td><td>collision</td></tr>
+<tr><td>accelerate, left 2 m</td><td class="num">3.56</td><td class="num">1.94</td><td class="num">4</td><td class="num">4.76</td><td>collision</td></tr>
+</table>
+<p>Where the numbers come from: the longitudinal jerk integral is 0.75 for both speed plans, the lateral one $720D^2/T^5 = 2.81$ for $D = \pm 2$ m; $J_v$ is small for the accelerating plan (speed 5 → 7 m/s stays within 1 m/s of 6) and large for the decelerating one (5 → 3 m/s).</p>
+<ol class="steps">
+<li>Without the obstacle, (accelerate, keep) would win with $J = 0.94$.</li>
+<li>With the obstacle, only the two right-2 m candidates are in $\mathcal{F}$: $J = 6.29$ (decelerate) vs <b>4.76</b> (accelerate) → $\tau^*$ = accelerate, right 2 m.</li>
+<li>For these two, jerk and lateral terms are equal, so the speed term decides. With $v_{ref} = 4$ m/s instead, decelerating would win ($J_v = 1.94$ vs 18.42) — the preference $\pi$ changes the choice, not the checks.</li>
+</ol>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l9_costs.svg" alt=""></div>
+<figcaption>Normalized cost parts of the six candidates. The cheapest candidates collide; the selection is made among the survivors only.</figcaption></figure>
+<div class="co pitfall"><p>Never select before filtering. In the example the two cheapest candidates both collide. Costs <em>rank</em> candidates; the checks decide which ones are allowed at all.</p></div>
+
+<h2>Generate, Evaluate, Select</h2>
+<div class="co intuition" data-t="In plain English"><p>Everything so far fits one template of three functions that share the same picture of the current situation. <b>Generate</b>: how could we move? <b>Evaluate</b>: what would happen with each candidate? <b>Select</b>: which one do we execute? The methods on the next slides are simply other ways to fill in Generate.</p></div>
+$$\tau^* = \mathrm{Plan}(c, g, \pi), \qquad \mathcal{T} = \mathrm{Generate}(c, g) = \{\tau_1, \dots, \tau_N\}$$
+$$\mathcal{R} = \mathrm{Evaluate}(\mathcal{T}, c, g) = \{(\tau_i, b_i, \mathbf{q}_i)\}, \qquad \tau^* = \mathrm{Select}(\mathcal{R}, \pi)$$
+<ul>
+<li>$c$: ego vehicle, surrounding objects and road; $g$: driving goal; $\pi$: selection criteria (weights, preferences).</li>
+<li>$b_i$: pass/fail results — drivable? safe? compatible with the goal? $\mathbf{q}_i$: quality scores such as the cost terms.</li>
+<li>What the lecture used so far: Generate = boundary conditions, polynomials and Cartesian conversion (slides 1–15); Evaluate = checks and cost calculation (16–18); Select = minimum weighted cost (18).</li>
+</ul>
+<div class="co key"><p>Execute the front part of the selected trajectory → update the current situation → call Plan() again (slide 19, bottom). The loop, not any single plan, is what drives the car.</p></div>
+
+<h2>Other generators I: curves with control points</h2>
+<div class="co intuition" data-t="In plain English"><p>Boundary-condition polynomials are one way to draw candidates. Another is to shape a curve with <b>control points</b>: the curve is pulled toward them like a flexible ruler. A Bézier curve is one cubic piece; a B-spline glues several cubic pieces together smoothly, so moving one control point bends only the nearby part.</p></div>
+$$d(t) = d_T(10u^3 - 15u^4 + 6u^5),\ \ u = t/T, \qquad \mathbf{S}(u) = \sum_{i=0}^{n} N_{i,3}(u)\,\mathbf{P}_i$$
+$$\mathbf{S}(u) = (1-u)^3\mathbf{P}_0 + 3u(1-u)^2\mathbf{P}_1 + 3u^2(1-u)\mathbf{P}_2 + u^3\mathbf{P}_3, \qquad 0 \le u \le 1$$
+<p>Slide 20 compares three shapes. <b>Boundary-value polynomial</b>: the end conditions fix the coefficients; the closed form above is the quintic for a start at rest. <b>Cubic B-spline</b>: basis functions $N_{i,3}$ blend the control points $\mathbf{P}_i$, several cubic segments joined at knots. <b>Cubic Bézier</b>: a single cubic segment (Bézier curves can also be chained into several segments).</p>
+<div class="co example" data-t="Worked example · checking the closed form of slide 20">
+<p>$d(0) = 0$ and $d(T) = d_T(10 - 15 + 6) = d_T$ ✓. Velocity: $\dot d = \frac{d_T}{T}(30u^2 - 60u^3 + 30u^4) = \frac{30 d_T}{T}u^2(1-u)^2$, zero at both ends ✓. Acceleration: $\ddot d = \frac{60 d_T}{T^2}u(1-u)(1-2u)$, zero at both ends ✓ — all six conditions of slide 8.</p>
+</div>
+<div class="co example" data-t="Extra example · a Bézier lane change">
+<p>$\mathbf{P}_0 = (0,0)$, $\mathbf{P}_1 = (4,0)$, $\mathbf{P}_2 = (8,2)$, $\mathbf{P}_3 = (12,2)$. At $u = 0.5$ all four weights are $1/8, 3/8, 3/8, 1/8$:</p>
+$$\mathbf{S}(0.5) = \tfrac{1}{8}(\mathbf{P}_0 + 3\mathbf{P}_1 + 3\mathbf{P}_2 + \mathbf{P}_3) = \tfrac{1}{8}(0 + 12 + 24 + 12,\ 0 + 0 + 6 + 2) = (6,\ 1)$$
+<p>Also $\mathbf{S}(0.25) = (3, 0.31)$ and $\mathbf{S}(0.75) = (9, 1.69)$. End tangents: $\mathbf{S}'(0) = 3(\mathbf{P}_1 - \mathbf{P}_0) = (12, 0)$ and $\mathbf{S}'(1) = 3(\mathbf{P}_3 - \mathbf{P}_2) = (12, 0)$ — the curve leaves and arrives heading along x, a lane-change shape that passes only through $\mathbf{P}_0$ and $\mathbf{P}_3$.</p>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l9_curves.svg" alt=""></div>
+<figcaption>Left: the Bézier example with its control polygon. Right: a cubic B-spline; moving one control point changes only the neighbouring segments (local control).</figcaption></figure>
+<div class="co pitfall"><p>A control-point curve is a <b>path</b>, not a trajectory: $u$ is neither time nor arc length. A separate time parameterization (a speed profile along the curve) is still needed — slide 20's final note — and the tangent from $d\mathbf{S}/du$ must be normalized.</p></div>
+
+<h2>Other generators II: closed-loop rollouts</h2>
+<div class="co intuition" data-t="In plain English"><p>Instead of drawing a curve and hoping the car can follow it, <b>simulate</b> the car. Pick a target (say, a lateral offset $r$), let a controller $K$ compute the command for the current predicted state, push that command through a vehicle model $f$ to get the next state, and repeat. The result is drivable by construction, because a model of the car produced it. One rollout per target sample gives one candidate.</p></div>
+$$\mathbf{u}_k^{(i)} = K\big(\mathbf{x}_k^{(i)}, \mathbf{r}_k^{(i)};\ \boldsymbol{\theta}^{(i)}\big), \qquad \mathbf{x}_{k+1}^{(i)} = f\big(\mathbf{x}_k^{(i)}, \mathbf{u}_k^{(i)}\big)$$
+<p>$i$: candidate number; $\mathbf{r}$: the target the controller tracks; $\boldsymbol\theta$: controller parameters (gains). "Closed loop" means the controller always sees the <em>predicted</em> state of the previous step — the feedback arrow on slide 21 — so the rollout shows what the controlled car would actually do.</p>
+<div class="co example split" data-t="Extra example · three rollouts with a toy model">
+<p>State: lateral offset $y$. Model: $y_{k+1} = y_k + \Delta t\,u_k$. Controller: $u_k = K(r - y_k)$ with $K = 1$ s⁻¹ and $\Delta t = 0.5$ s, so $y_{k+1} = y_k + 0.5(r - y_k)$:</p>
+<table class="tbl compact">
+<tr><th>Target</th><th class="num">y₁</th><th class="num">y₂</th><th class="num">y₃</th><th class="num">y₄</th><th class="num">y₅</th></tr>
+<tr><td>r = +2 m</td><td class="num">1.0</td><td class="num">1.5</td><td class="num">1.75</td><td class="num">1.875</td><td class="num">1.9375</td></tr>
+<tr><td>r = 0</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">0</td></tr>
+<tr><td>r = −2 m</td><td class="num">−1.0</td><td class="num">−1.5</td><td class="num">−1.75</td><td class="num">−1.875</td><td class="num">−1.9375</td></tr>
+</table>
+<p>Closed form: $y_k = r\,(1 - 0.5^k)$ — each step closes half of the remaining gap. Three target samples give three candidates.</p>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l9_rollout.svg" alt=""></div>
+<figcaption>Left: the three rollouts. Right: the controller gain shapes the candidate — with $K\Delta t > 2$ the predicted motion even diverges.</figcaption></figure>
+<div class="co pitfall"><p>The rollouts are only as good as the model and the controller. Each step multiplies the remaining error by $(1 - K\Delta t)$: with $K\Delta t = 1.5$ the motion overshoots, with $K\Delta t > 2$ it is unstable. Real planners use a vehicle model such as the bicycle model of Lecture 2 and a path-tracking controller — the topic of the next lecture.</p></div>
+
+<h2>Other generators III: learned end-to-end models</h2>
+<div class="co intuition" data-t="In plain English"><p>A learned model (a neural network) $G_\theta$ takes the camera image $o$, the vehicle state $x$ and the driving goal $g$, and outputs trajectories directly. A <b>latent variable</b> $z_i$ — a random code fed in alongside — makes it produce several different but plausible candidates from the same input (for example go left, go straight, go right). The candidates then still go through evaluation and selection.</p></div>
+$$\tau_i = G_\theta(o, x, g, z_i)$$
+<p>$o$: camera observation; $x$: vehicle state; $g$: driving goal; $z_i$: latent variable of candidate $i$; $\tau_i$: the $i$-th candidate trajectory; $\theta$: learned weights (obtained by training, not hand-tuned).</p>
+<div class="co key"><p>A network can capture behaviour that is hard to write as rules (merging into dense traffic, negotiating with other drivers) and runs fast. But nothing guarantees that its output is drivable or collision-free, it needs a lot of data, and its decisions are hard to explain. That is why slide 22 keeps the "evaluate · select" box after it: the checks of slides 16–17 remain the safety net.</p></div>
+
+<h2>Other generators IV: optimization</h2>
+<div class="co intuition" data-t="In plain English"><p>Start from a rough trajectory — even a straight line through the obstacle — and improve it step by step: compute its cost (tracking error, smoothness, collision) and its constraints, change the trajectory variables (positions or control inputs) to lower the cost, and repeat until nothing improves. Each iteration bends the path a little further away from the obstacle (slide 23). At the end, check that the constraints are really satisfied.</p></div>
+$$\tau^{(k+1)} = \mathrm{Improve}\big(\tau^{(k)}, c, g\big), \qquad k: \text{ optimization iteration}$$
+<div class="co example split" data-t="Extra example · one waypoint pushed away from an obstacle (penalty method, Lecture 7)">
+<p>Let $y$ be the lateral offset of one waypoint beside an obstacle. Stay close to the path, but pay a penalty for coming closer than 2 m:</p>
+$$J(y) = y^2 + \mu\,\max(0,\ 2 - y)^2, \qquad \mu = 10$$
+<ol class="steps">
+<li>Gradient (for $y &lt; 2$): $J'(y) = 2y - 2\mu(2 - y)$. Gradient descent with step $\alpha = 0.04$ from the straight line $y_0 = 0$:</li>
+<li>$y_1 = 0 - 0.04(-40) = 1.6$; $\ y_2 = 1.792$; $\ y_3 = 1.815$; … converging to $y^* = 2\mu/(1 + \mu) = 1.818$ m.</li>
+<li><b>Constraint check:</b> $1.818 &lt; 2$ — the safety distance is violated by 0.18 m. A soft penalty trades safety against cost.</li>
+<li>Raising the weight helps only gradually: $\mu = 100$ gives 1.980 m, $\mu = 1000$ gives 1.998 m. The constraint is met only in the limit — hence slide 23's final box "check whether the constraints are satisfied", or a constrained solver (SQP, KKT conditions of Lecture 7).</li>
+</ol>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l9_penalty.svg" alt="" style="max-width:86%"></div>
+<figcaption>Left: the cost and the gradient iterates. Right: the optimum approaches the safe boundary $y = 2$ only as $\mu \to \infty$.</figcaption></figure>
+<div class="co pitfall"><p>Optimization gives smooth, high-quality trajectories and handles many constraints at once, but it finds a <em>local</em> minimum: whether the path bends left or right around the obstacle depends on the initial trajectory. That is why it is often seeded with the best sampled candidate.</p></div>
+
+<h2>Receding horizon and trajectory tracking</h2>
+<div class="co intuition" data-t="In plain English"><p>Plan 4 s ahead, but drive only the first fraction $\Delta t$, then plan again from the newly measured state. The long horizon lets the planner see consequences early (an obstacle 30 m ahead); the frequent replanning corrects for prediction errors, new obstacles and imperfect tracking. A controller — next lecture — turns the selected trajectory into steering and acceleration commands.</p></div>
+<figure class="fig"><div class="panel"><img src="fig/l9_receding.svg" alt=""></div>
+<figcaption>Each plan covers the horizon $T$, but only its first $\Delta t$ is executed before the next plan replaces it.</figcaption></figure>
+<div class="co example" data-t="Extra example · how much of a plan is used?">
+<p>With $T = 4$ s and replanning every $\Delta t = 0.1$ s, only $0.1/4 = 2.5$% of each plan is ever executed; the planner runs 10 times per second, and at 10 m/s the car moves 1 m between plans. The whole Generate–Evaluate–Select cycle must finish within 0.1 s.</p>
+</div>
+<div class="co pitfall"><p>Each new plan must start from the current state: $d_0$, $\dot d_0$, $\ddot d_0$ (and $s$, $\dot s$, $\ddot s$) taken from the state estimate or from the previous plan at the current time. Otherwise the commands jump at every replanning step — which is why slide 9 insists that the method works for nonzero initial states. Successive plans should also agree with each other; otherwise the car can flip between passing left and passing right (compare the hysteresis of Lecture 8).</p></div>
+
+<h2>Choosing a generator</h2>
+<table class="tbl compact">
+<tr><th style="width:20%">Method</th><th style="width:25%">How candidates are made</th><th>Strengths</th><th>Weaknesses</th></tr>
+<tr><td>Boundary-value polynomials (s1–15)</td><td>quintic / quartic per boundary conditions, combined</td><td>closed form, fast, smooth, easy to sample in s and d</td><td>limits only checked afterwards; simple shapes</td></tr>
+<tr><td>Control-point curves (s20)</td><td>Bézier or B-spline through control points</td><td>flexible shapes, local control (B-spline)</td><td>a path only — needs a speed profile; not automatically drivable</td></tr>
+<tr><td>Closed-loop rollouts (s21)</td><td>controller + vehicle model, one rollout per target</td><td>drivable by construction</td><td>depends on model and controller quality; slower</td></tr>
+<tr><td>Learned E2E (s22)</td><td>network $G_\theta$ with latent $z_i$</td><td>handles complex interactions, fast at run time</td><td>no guarantees, data-hungry, hard to explain</td></tr>
+<tr><td>Optimization (s23)</td><td>iterative improvement of one trajectory</td><td>high quality, many constraints at once</td><td>local minima, computation time, needs a good start</td></tr>
+</table>
+
+<h2>Formula sheet</h2>
+<div class="fsheet">
+  <div class="f"><div class="n">Unit tangent · left normal</div><div class="eq">$\mathbf{t} = d\mathbf{r}/ds,\ \|\mathbf{t}\| = 1;\ \ \mathbf{n} = [-t_y,\ t_x]^T$</div></div>
+  <div class="f"><div class="n">Frenet → Cartesian</div><div class="eq">$\mathbf{p} = \mathbf{r}(s) + d\,\mathbf{n}(s)$, d &gt; 0 left</div></div>
+  <div class="f"><div class="n">Cartesian → Frenet</div><div class="eq">$s^* = \argmin_s \|\mathbf{p} - \mathbf{r}(s)\|^2,\ d = (\mathbf{p} - \mathbf{r}(s^*))^T\mathbf{n}(s^*)$</div></div>
+  <div class="f"><div class="n">Trajectory</div><div class="eq">$\mathbf{p}(t) = \mathbf{r}(s(t)) + d(t)\,\mathbf{n}(s(t))$</div></div>
+  <div class="f"><div class="n">Quintic start</div><div class="eq">$a_0 = d_0,\ a_1 = \dot d_0,\ a_2 = \ddot d_0/2$; then 3 × 3 system</div></div>
+  <div class="f"><div class="n">Quintic from rest</div><div class="eq">$d = D(10u^3 - 15u^4 + 6u^5)$; peaks $1.875D/T$, $5.774D/T^2$</div></div>
+  <div class="f"><div class="n">Curvature · basis</div><div class="eq">$\kappa = d\theta/ds;\ d\mathbf{t}/ds = \kappa\mathbf{n};\ d\mathbf{n}/ds = -\kappa\mathbf{t}$</div></div>
+  <div class="f"><div class="n">Velocity</div><div class="eq">$v_T = (1 - \kappa_r d)\dot s,\ \ v_N = \dot d$</div></div>
+  <div class="f"><div class="n">Tangential acceleration</div><div class="eq">$a_T = (1 - \kappa_r d)\ddot s - \kappa_r' d\dot s^2 - 2\kappa_r\dot s\dot d$</div></div>
+  <div class="f"><div class="n">Normal acceleration</div><div class="eq">$a_N = \ddot d + \kappa_r(1 - \kappa_r d)\dot s^2$</div></div>
+  <div class="f"><div class="n">To x–y</div><div class="eq">$(\dot x, \dot y) = v_T(\cos\theta_r, \sin\theta_r) + v_N(-\sin\theta_r, \cos\theta_r)$</div></div>
+  <div class="f"><div class="n">Speed · direction</div><div class="eq">$v = \sqrt{v_T^2 + v_N^2},\ \ \theta_p = \atantwo(\dot y, \dot x)$</div></div>
+  <div class="f"><div class="n">Candidate curvature</div><div class="eq">$\kappa_p = (\dot x\ddot y - \dot y\ddot x)/v^3 = (v_T a_N - v_N a_T)/v^3$</div></div>
+  <div class="f"><div class="n">Along · across</div><div class="eq">$a_\parallel = (v_T a_T + v_N a_N)/v,\ \ a_\perp = v^2\kappa_p$</div></div>
+  <div class="f wide"><div class="n">Collision</div><div class="eq">$\|\mathbf{c}_k - \mathbf{o}\| \le r_k + r_{obs} + m;\ r_k = \sqrt{(L/2n)^2 + (W/2)^2}$</div></div>
+  <div class="f wide"><div class="n">Limits</div><div class="eq">$v^2\left|\kappa_p\right| \le a_{\perp,max},\ \left|\kappa_p\right| \le \kappa_{max},\ v^* = \sqrt{a_{\perp,max}/\kappa_{max}}$</div></div>
+  <div class="f"><div class="n">Cost · selection</div><div class="eq">$J = \sum w_k J_k/S_k,\ \ \tau^* = \argmin_{\tau \in \mathcal{F}} J$</div></div>
+  <div class="f"><div class="n">Framework</div><div class="eq">$\tau^* = \mathrm{Select}(\mathrm{Evaluate}(\mathrm{Generate}(c, g), c, g), \pi)$</div></div>
+</div>
+
+<div style="break-before: page"></div>
+<h2>Practice problems</h2>
+<p class="qblock-intro">New numbers, same ideas as the slides. Try each one on paper before reading the solution.</p>
+
+<div class="qa" data-type="apply" data-level="1">
+<div class="q"><p>A straight reference path starts at the origin and heads at 60° from the x-axis. Give $\mathbf{t}$ and $\mathbf{n}$, and the Frenet coordinates of the car at $\mathbf{p} = (2, 5)$.</p></div>
+<div class="a">
+<p>$\mathbf{t} = (\cos 60°, \sin 60°) = (0.5,\ 0.866)$, $\ \mathbf{n} = (-0.866,\ 0.5)$. Since $\mathbf{r}(s) = s\,\mathbf{t}$: $s^* = \mathbf{p}^T\mathbf{t} = 1 + 4.330 = 5.33$ m and $d = \mathbf{p}^T\mathbf{n} = -1.732 + 2.5 = 0.77$ m — left of the path.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>A left curve of radius 25 m starts at the origin heading along +x (centre (0, 25)). Find the x–y position of the point $(s, d) = (25\pi/4,\ -2)$.</p></div>
+<div class="a">
+<p>Angle turned: $s/R = \pi/4 = 45°$. $\mathbf{r} = (25\sin 45°,\ 25 - 25\cos 45°) = (17.678,\ 7.322)$, $\mathbf{n} = (-\sin 45°, \cos 45°) = (-0.707,\ 0.707)$.</p>
+<p>$\mathbf{p} = \mathbf{r} - 2\mathbf{n} = (17.678 + 1.414,\ 7.322 - 1.414) = (19.09,\ 5.91)$. Check: distance from the centre $= 27 = R - d$ — outside the curve, as a negative (right) offset on a left curve should be.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>Same curve. The car is at $\mathbf{p} = (10, -3)$. Find $s^*$ and $d$.</p></div>
+<div class="a">
+<p>Project along the radius: $\mathbf{p} - \mathbf{c} = (10, -28)$, $\|\mathbf{p} - \mathbf{c}\| = 29.73$ m. Nearest point $\mathbf{r}^* = \mathbf{c} + 25\,(10, -28)/29.73 = (8.41,\ 1.46)$; its angle is $\arctan(8.41 / (25 - 1.46)) = 19.65°$ = 0.343 rad, so $s^* = 25 \times 0.343 = 8.58$ m.</p>
+<p>$d = R - \|\mathbf{p} - \mathbf{c}\| = 25 - 29.73 = -4.73$ m: 4.73 m to the right of (outside) the path.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>Plan a lane change of 3.5 m to the right in $T = 5$ s, starting at rest on the path. Give the coefficients, the peak lateral speed and acceleration, and the shortest $T$ that keeps the lateral acceleration within 1 m/s².</p></div>
+<div class="a">
+<p>$D = -3.5$ m, $a_0 = a_1 = a_2 = 0$: $a_3 = 10D/T^3 = -0.28$, $a_4 = -15D/T^4 = 0.084$, $a_5 = 6D/T^5 = -0.00672$.</p>
+<p>Peaks: $\left|\dot d\right|_{max} = 1.875 \times 3.5/5 = 1.31$ m/s at $t = 2.5$ s; $\left|\ddot d\right|_{max} = 5.774 \times 3.5/25 = 0.81$ m/s².</p>
+<p>For $5.774 \times 3.5/T^2 \le 1$: $T \ge \sqrt{20.2} = 4.50$ s. Halving $T$ would quadruple the acceleration and multiply the jerk cost by 32.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="3">
+<div class="q"><p>The car is 1 m left of the path, moving right at 0.5 m/s, with zero lateral acceleration. Find the quintic that brings it back to the path in $T = 4$ s, and its offset at $t = 2$ s.</p></div>
+<div class="a">
+<ol class="steps">
+<li>$a_0 = 1$, $a_1 = -0.5$, $a_2 = 0$.</li>
+<li>Right-hand side: $0 - 1 + 0.5(4) - 0 = 1$; $\ 0.5$; $\ 0$.</li>
+<li>Solve $\begin{bmatrix} 64 & 256 & 1024 \\ 48 & 256 & 1280 \\ 24 & 192 & 1280 \end{bmatrix}\begin{bmatrix} a_3 \\ a_4 \\ a_5 \end{bmatrix} = \begin{bmatrix} 1 \\ 0.5 \\ 0 \end{bmatrix}$: $a_3 = 1/32 = 0.03125$, $a_4 = -1/256 = -0.00391$, $a_5 = 0$.</li>
+</ol>
+<p>$d(t) = 1 - 0.5t + t^3/32 - t^4/256$ (here $a_5$ happens to be zero). $d(2) = 1 - 1 + 0.25 - 0.0625 = 0.1875$ m. Check: $d(4) = 1 - 2 + 2 - 1 = 0$ ✓.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>Why does the lateral plan use a quintic and the speed-keeping plan a quartic? What would go wrong with a cubic for the lateral plan?</p></div>
+<div class="a">
+<p>The number of boundary conditions sets the degree. Lateral: position, velocity and acceleration at both ends = 6 conditions → 6 coefficients → quintic. Speed keeping: 3 start conditions, but at the end only speed and acceleration are fixed (the final position is free) = 5 conditions → quartic.</p>
+<p>A cubic has 4 coefficients: it can match position and velocity at both ends, but not the accelerations. The lateral acceleration would jump at the start (from the current $\ddot d_0$ to whatever the cubic demands) — that is a step in the steering command and an infinite jerk.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="1">
+<div class="q"><p>A planner combines 3 end speeds, 7 lateral offsets and 2 durations, checks every 0.01 s over 4 s with 3 covering circles against 5 obstacles, and replans at 10 Hz. How many candidates and distance checks is that?</p></div>
+<div class="a">
+<p>$3 \times 7 \times 2 = 42$ candidates. Per candidate: 400 time samples × 3 circles × 5 obstacles = 6 000 distance checks; per planning cycle 252 000; at 10 Hz about 2.5 million per second. Distance checks are cheap — which is exactly why circles are used.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>On a left curve of radius 40 m the reference point moves at $\dot s = 12$ m/s and $\dot d = 0$. Find the car's speed at $d = -1.5$ m and at $d = +1.5$ m, and explain the difference.</p></div>
+<div class="a">
+<p>$\kappa_r = 1/40$. $v_T = (1 - \kappa_r d)\dot s$: $d = -1.5$: $(1 + 0.0375) \times 12 = 12.45$ m/s; $d = +1.5$: $(1 - 0.0375) \times 12 = 11.55$ m/s. Moving abreast of the same reference point, the outer car covers a longer arc (radius 41.5 m) than the inner car (38.5 m) in the same time.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>What happens to the Frenet description when $d \to 1/\kappa_r$? Name two consequences and one practical counter-measure.</p></div>
+<div class="a">
+<p>At $d = 1/\kappa_r = R$ the car sits at the centre of curvature. (1) $v_T = (1 - \kappa_r d)\dot s = 0$: moving the reference point no longer moves the car, so the mapping between $(\dot s, \dot d)$ and the velocity is singular. (2) Every point of the arc is equally near, so the projection $s^*$ is not unique (slide 6's condition fails). Counter-measures: sample only offsets with $\left|\kappa_r d\right| &lt; 1$ (well below), use a smoother or less curved reference path, and warm-start the projection near the previous $s^*$.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>A candidate has $\dot x = 6$, $\dot y = 8$ m/s and $\ddot x = -2$, $\ddot y = 1.5$ m/s². Find the speed, direction of travel, curvature, $a_\parallel$ and $a_\perp$.</p></div>
+<div class="a">
+<p>$v = \sqrt{36 + 64} = 10$ m/s; $\theta_p = \atantwo(8, 6) = 53.13°$.</p>
+<p>$\kappa_p = (6 \times 1.5 - 8 \times (-2))/10^3 = 25/1000 = 0.025$ m⁻¹ (radius 40 m).</p>
+<p>$a_\parallel = (\dot x\ddot x + \dot y\ddot y)/v = (-12 + 12)/10 = 0$; $\ a_\perp = v^2\kappa_p = 2.5$ m/s². The acceleration is entirely sideways: constant speed, pure turning.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>Limits: $a_{\perp,max} = 2.5$ m/s², $\kappa_{max} = 0.25$ m⁻¹. Find $v^*$, the smallest allowed turning radius at 15 m/s, and decide whether a candidate with a 60 m radius at 15 m/s passes. How fast may it go on that radius?</p></div>
+<div class="a">
+<p>$v^* = \sqrt{2.5/0.25} = 3.16$ m/s. At 15 m/s: $\left|\kappa\right| \le 2.5/225 = 0.0111$ m⁻¹ → radius ≥ 90 m.</p>
+<p>Radius 60 m at 15 m/s: $a_\perp = 225/60 = 3.75$ m/s² $> 2.5$ → rejected. Maximum speed on that radius: $\sqrt{2.5 \times 60} = 12.2$ m/s.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>A 4.8 × 2.0 m car is covered by 3 circles. The obstacle has radius 0.4 m and the margin is 0.3 m. The car centre is at the origin heading along +x; the obstacle is at (2.4, 1.5). Collision?</p></div>
+<div class="a">
+<p>Slices of 1.6 m: $r_k = \sqrt{0.8^2 + 1.0^2} = 1.281$ m, centres at $x = -1.6, 0, +1.6$. Threshold: $1.281 + 0.4 + 0.3 = 1.981$ m.</p>
+<p>Distances: rear $\sqrt{4.0^2 + 1.5^2} = 4.27$; middle $\sqrt{2.4^2 + 1.5^2} = 2.83$; front $\sqrt{0.8^2 + 1.5^2} = 1.70$ m. $1.70 \le 1.981$ → <b>collision</b> via the front circle.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>With the numbers of the previous problem, the car passes the obstacle at 15 m/s and checks every 0.2 s. Can the check miss the collision? What is the longest safe interval if the circle centre passes 1.5 m from the obstacle centre?</p></div>
+<div class="a">
+<p>Between checks the car moves $15 \times 0.2 = 3$ m. Passing straight through the obstacle centre, the danger zone is $2 \times 1.981 = 3.96$ m long, so at least one sample always lands in it. Passing 1.5 m off-centre, the zone is only a chord of $2\sqrt{1.981^2 - 1.5^2} = 2.59$ m — shorter than the 3 m step, so the check <b>can miss</b> it. To guarantee a sample inside: $\Delta t \le 2.59/15 = 0.17$ s — or check the swept segment instead of points.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>Three candidates passed all checks, with $(J_j, J_v, J_d)$ = A (2.0, 30, 0), B (0.5, 50, 1), C (1.2, 20, 4) and scales $S = (1, 25, 4)$. Which is selected with all weights 1? And with $w_v = 3$?</p></div>
+<div class="a">
+<p>Weights (1, 1, 1): A $= 2.0 + 1.2 + 0 = 3.2$; B $= 0.5 + 2.0 + 0.25 = 2.75$; C $= 1.2 + 0.8 + 1.0 = 3.0$ → <b>B</b> (smoothest).</p>
+<p>$w_v = 3$: A $= 2.0 + 3.6 + 0 = 5.6$; B $= 0.5 + 6.0 + 0.25 = 6.75$; C $= 1.2 + 2.4 + 1.0 = 4.6$ → <b>C</b> (closest to the desired speed). Same candidates, same checks — the preference $\pi$ decides.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="1">
+<div class="q"><p>A cubic Bézier curve has $\mathbf{P}_0 = (0,0)$, $\mathbf{P}_1 = (3,0)$, $\mathbf{P}_2 = (6,3)$, $\mathbf{P}_3 = (10,3)$. Find $\mathbf{S}(0.5)$, $\mathbf{S}(0.25)$ and the end tangents. Is $u$ the arc length?</p></div>
+<div class="a">
+<p>$\mathbf{S}(0.5) = \frac{1}{8}(\mathbf{P}_0 + 3\mathbf{P}_1 + 3\mathbf{P}_2 + \mathbf{P}_3) = \frac{1}{8}(37, 12) = (4.625,\ 1.5)$.</p>
+<p>$\mathbf{S}(0.25)$: weights $27/64,\ 27/64,\ 9/64,\ 1/64$ → $(2.27,\ 0.47)$.</p>
+<p>$\mathbf{S}'(0) = 3(\mathbf{P}_1 - \mathbf{P}_0) = (9, 0)$ and $\mathbf{S}'(1) = 3(\mathbf{P}_3 - \mathbf{P}_2) = (12, 0)$: heading 0° at both ends, but with different lengths — the curve is traversed at different "speeds" per unit $u$, so $u$ is not arc length. A time parameterization is still needed.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>Roll out $y_{k+1} = y_k + \Delta t\,K(r - y_k)$ with $K = 0.8$ s⁻¹, $\Delta t = 0.5$ s, $r = 3$ m from $y_0 = 0$ for four steps. What changes with $K = 3$ and $K = 4.5$?</p></div>
+<div class="a">
+<p>$K\Delta t = 0.4$: each step closes 40 % of the gap, $y_k = 3(1 - 0.6^k)$: 1.2, 1.92, 2.35, 2.61 m.</p>
+<p>$K = 3$ ($K\Delta t = 1.5$): 4.5, 2.25, 3.38, 2.81 — overshoots and oscillates, but converges since $\left|1 - 1.5\right| &lt; 1$. $K = 4.5$ ($K\Delta t = 2.25$): 6.75, −1.69, 8.86, −4.32 — diverges, since $\left|1 - 2.25\right| &gt; 1$. A badly tuned controller produces useless candidates even with a perfect model.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>The planner computes a 4 s trajectory but the car executes only 0.1 s of it. Why not plan only 0.1 s ahead — and why not execute the whole 4 s?</p></div>
+<div class="a">
+<p>Planning only 0.1 s ahead would make the planner short-sighted: it could not see that a lane change must start now to avoid an obstacle 30 m ahead, or that braking later would exceed the deceleration limit. Executing all 4 s would ignore everything that happens meanwhile — tracking errors, other cars changing their minds, newly detected obstacles. The receding horizon keeps the foresight of the long plan and the reactivity of frequent replanning; the price is computation (10 full plan cycles per second) and the need for each new plan to start smoothly from the current state.</p>
+</div>
+</div><!--/qa-->
+</section>

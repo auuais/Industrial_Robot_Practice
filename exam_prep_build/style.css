@@ -276,3 +276,5 @@ table.tbl.split tr { break-inside: avoid; }
 .co.split .co-t { break-after: avoid; }
 @page l8 { @top-right { content: "Lecture 8 · Global planning & route execution"; color: #fb923c; font: 600 7.6pt "Segoe UI"; vertical-align: bottom; padding-bottom: 3mm; } }
 section.l8 { page: l8; --acc: var(--orange); --lec: "8"; }
+@page l9 { @top-right { content: "Lecture 9 · Local trajectory planning"; color: #2dd4bf; font: 600 7.6pt "Segoe UI"; vertical-align: bottom; padding-bottom: 3mm; } }
+section.l9 { page: l9; --acc: var(--teal); --lec: "9"; }
