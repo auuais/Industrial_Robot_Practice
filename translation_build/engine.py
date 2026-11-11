@@ -16,6 +16,9 @@ Options per item:
     span_range=(i, j)  replace only spans i..j of the matched line
     contains=True      match when the key is contained in the line
     nth=k              only the k-th match on the page
+    follow=True        start `gap` pt (default 14) after the previous item's English (legend rows
+                       with several entries; give every entry of the row an explicit `limit`)
+The spec may also set SUB_SCALE, SUB_DY, SUP_DY to match the deck's own sub/superscripts.
 
 Korean baked into raster images: the spec may define LABELS = {page: [(rect, english, opts), ...]}.
 `rect` (page coords) must enclose the Korean label and nothing else of the same colour; the
@@ -419,6 +422,10 @@ def draw_label(page, pno, t, report):
 
 # ----------------------------------------------------------------- main build
 def build(spec):
+    global SUB_SCALE, SUB_DY, SUP_DY     # decks set subscripts differently (Lecture 10: 0.53 size, 0.19 drop)
+    SUB_SCALE = getattr(spec, 'SUB_SCALE', SUB_SCALE)
+    SUB_DY = getattr(spec, 'SUB_DY', SUB_DY)
+    SUP_DY = getattr(spec, 'SUP_DY', SUP_DY)
     src = fitz.open(spec.SRC)
     doc = fitz.open(spec.SRC)
     cfg = dict(RIGHT_MARGIN=getattr(spec, 'RIGHT_MARGIN', RIGHT_MARGIN))
@@ -488,6 +495,7 @@ def build(spec):
                 report.append('p%d REDACTION MISMATCH (lost): %s' % (pno, t))
         # ---- draw
         drawn = []
+        last_end = None
         for j in jobs:
             o = j['opts']
             base = 'MGB' if (j['bold'] or o.get('bold')) else 'MG'
@@ -497,6 +505,8 @@ def build(spec):
             w = runs_width(runs)
             L = j['line']
             x0 = j['x'] + o.get('dx', 0)
+            if o.get('follow') and last_end is not None:
+                x0 = last_end + o.get('gap', 14)     # legend rows: start after the previous item's English
             y = j['y'] + o.get('dy', 0)
             s = j['size']
             top, bot = y - 0.8 * s, y + 0.25 * s
@@ -564,6 +574,7 @@ def build(spec):
                 tw.append((x, y + dy), t, font=FONTS[k], fontsize=fs)
                 x += FONTS[k].text_length(t, fontsize=fs)
             tw.write_text(page)
+            last_end = x
             fs0 = max(r[2] for r in runs) if runs else s
             nr = fitz.Rect(x0, y - 0.82 * fs0, x, y + 0.24 * fs0)
             drawn.append((nr, j))
