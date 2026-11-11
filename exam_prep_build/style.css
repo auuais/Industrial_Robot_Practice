@@ -278,3 +278,5 @@ table.tbl.split tr { break-inside: avoid; }
 section.l8 { page: l8; --acc: var(--orange); --lec: "8"; }
 @page l9 { @top-right { content: "Lecture 9 · Local trajectory planning"; color: #2dd4bf; font: 600 7.6pt "Segoe UI"; vertical-align: bottom; padding-bottom: 3mm; } }
 section.l9 { page: l9; --acc: var(--teal); --lec: "9"; }
+@page l10 { @top-right { content: "Lecture 10 · Tracking control"; color: #60a5fa; font: 600 7.6pt "Segoe UI"; vertical-align: bottom; padding-bottom: 3mm; } }
+section.l10 { page: l10; --acc: var(--blue); --lec: "10"; }

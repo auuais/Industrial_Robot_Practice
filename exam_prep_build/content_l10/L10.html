@@ -1,0 +1,491 @@
+<section class="chapter l10" id="ch-l10">
+<header class="ch-head">
+  <div class="ch-bignum">10</div>
+  <div class="ch-kicker">Lecture 10 · Tracking control</div>
+  <h1>Tracking control: steering and speed</h1>
+  <p class="ch-sub">How the car actually follows what the planner produced: measure how far it is off the path or behind the trajectory, turn that into a steering angle and an acceleration, convert the acceleration into throttle and brake, and stay stable when the car's parameters are unknown or its actuators hit their limits.</p>
+</header>
+<div class="glance">
+  <div><div class="gh">After this chapter you can</div><ul>
+    <li>use the <b>kinematic bicycle model</b> to get yaw rate and turning radius from speed and steering</li>
+    <li>compute the path-tracking errors <b>e<sub>y</sub></b> and <b>e<sub>ψ</sub></b>, including the angle wrap</li>
+    <li>run <b>Pure Pursuit</b> by hand and explain what the lookahead distance does</li>
+    <li>run <b>Stanley</b> and show why its front-axle error decays exponentially</li>
+    <li>model the <b>longitudinal forces</b> and tune a <b>PI speed controller</b> from ω<sub>n</sub> and ζ</li>
+    <li>turn an acceleration command into throttle or brake with an <b>actuator map</b> or an <b>online-estimated</b> model</li>
+    <li>explain <b>adaptive control</b> with a Lyapunov function, and handle <b>limits</b> with anti-windup</li>
+    <li>compute <b>trajectory-tracking errors</b> and apply the <b>Kanayama</b> controller to a car</li>
+  </ul></div>
+  <div><div class="gh">Slide map</div><ul class="slidemap">
+    <li><span>Kinematic bicycle model</span><span class="sl">s1</span></li>
+    <li><span>Path-tracking errors</span><span class="sl">s2</span></li>
+    <li><span>Pure Pursuit</span><span class="sl">s3–5</span></li>
+    <li><span>Stanley</span><span class="sl">s6–7</span></li>
+    <li><span>Longitudinal dynamics, PI control</span><span class="sl">s8–9</span></li>
+    <li><span>Actuator map, online estimation</span><span class="sl">s10–11</span></li>
+    <li><span>Adaptive control</span><span class="sl">s12</span></li>
+    <li><span>Limits, anti-windup, hill hold</span><span class="sl">s13</span></li>
+    <li><span>Trajectory-tracking errors</span><span class="sl">s14–15</span></li>
+    <li><span>Kanayama controller</span><span class="sl">s16–17</span></li>
+  </ul></div>
+</div>
+
+<h2>The big picture</h2>
+<div class="co intuition" data-t="In plain English"><p>The planner of Lecture 9 hands over a reference: a path (a line to stay on) or a trajectory (a line with a timetable). The controller compares where the car is with where it should be, many times per second, and commands steering and throttle or brake to shrink the difference. The lecture splits the job in two. <b>Lateral control</b> steers to stay on the line. <b>Longitudinal control</b> sets the speed. At the end, one controller does both together for a time-stamped trajectory.</p></div>
+<figure class="fig"><div class="panel"><img src="fig/l10_overview.svg" alt=""></div>
+<figcaption>The control loop of the lecture. Lateral and longitudinal control share the reference and the state estimate, and act on the vehicle through steering and throttle/brake.</figcaption></figure>
+<div class="co key"><p><b>Path tracking vs trajectory tracking.</b> Path tracking only asks "am I on the line?": errors are measured from the <em>closest</em> path point, and speed is handled separately (slides 1–13). Trajectory tracking asks "am I where the reference is <em>right now</em>?": errors are measured from the reference at the same instant, so being late or early counts too (slides 14–17).</p></div>
+
+<h2>The kinematic bicycle model</h2>
+<div class="co intuition" data-t="In plain English"><p>Squash the four wheels into two: one rear wheel and one steerable front wheel, a wheelbase L apart. If the tyres do not slide sideways, each wheel rolls in the direction it points, and the whole car turns around one point on the line of the rear axle. The steering angle fixes the radius of that turn; the speed only sets how fast the car goes around it.</p></div>
+$$q = [x, y, \psi]^T, \quad v \gt 0, \qquad \dot x = v\cos\psi, \qquad \dot y = v\sin\psi, \qquad \dot\psi = \frac{v}{L}\tan\delta$$
+<ul>
+<li>$(x, y)$: position of the rear-axle centre; $\psi$: heading; $v$: rear-axle speed; $\delta$: steering angle; $L$: wheelbase.</li>
+<li>Assumptions (slide 1): planar, forward motion and no tyre side slip. That holds well at moderate lateral acceleration, which is why the model serves path tracking at normal speeds, and fails near the grip limit.</li>
+<li>Dividing the yaw rate by the speed gives the curvature of the rear-axle path: $\kappa = \dot\psi / v = \tan\delta / L$, and the turning radius is $R = L / \tan\delta$.</li>
+</ul>
+<div class="co example" data-t="Extra example · slide 1 in numbers">
+<p>Car with $L = 2.7$ m at $v = 10$ m/s, steering $\delta = 5°$ ($\tan 5° = 0.0875$):</p>
+<ol class="steps">
+<li>Yaw rate: $\dot\psi = \frac{10}{2.7} \times 0.0875 = 0.324$ rad/s (18.6°/s). A quarter turn takes $\frac{\pi/2}{0.324} = 4.85$ s.</li>
+<li>Radius: $R = 2.7 / 0.0875 = 30.9$ m, curvature $\kappa = 0.0324$ 1/m.</li>
+<li>Two Euler steps of $\Delta t = 0.1$ s from the origin heading along $x$: $(x, y, \psi) = (1.000,\ 0,\ 0.0324)$, then $(1.9995,\ 0.0324,\ 0.0648)$. The exact position after 1 s on the circle is $(9.826,\ 1.606)$.</li>
+</ol>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l10_bicycle.svg" alt="" style="max-width:86%"></div>
+<figcaption>Rear-axle paths for three constant steering angles. Doubling δ roughly halves the radius; the speed does not change the path, only how quickly it is driven.</figcaption></figure>
+<div class="co key"><p><b>Steering sets curvature; speed scales it into yaw rate:</b> $\dot\psi = v\kappa$. That is why every controller in this lecture first works out a curvature (or a heading correction) and only then converts it into a steering angle with $\delta = \arctan(L\kappa)$.</p></div>
+<div class="co pitfall"><p>The reference point is the rear axle, and $v$ is the rear-axle speed. Tracking a different point changes the equations: Stanley deliberately uses the front axle, where the front wheel moves at $v / \cos\delta$ (slide 6).</p></div>
+
+<h2>Path-tracking errors</h2>
+<div class="co intuition" data-t="In plain English"><p>Two numbers describe how far off the car is: how far it is sideways from the closest path point ($e_y$), and how much its heading differs from the path direction there ($e_\psi$). Left of the path and counterclockwise count as positive.</p></div>
+$$s_* = \argmin_{s}\|p - \mathbf{p}_r(s)\|^2, \qquad \mathbf{n}_r = [-\sin\psi_r,\ \cos\psi_r]^T$$
+$$e_y = \mathbf{n}_r^T\big(p - \mathbf{p}_r(s_*)\big), \qquad e_\psi = \wrap(\psi - \psi_r)$$
+<p>This is exactly the Frenet projection of Lecture 9: $s_*$ is the path distance of the closest point, $\mathbf{n}_r$ the left normal and $e_y$ the lateral offset $d$. $\psi_r$ and $\mathbf{n}_r$ are evaluated at $s_*$, and $\wrap$ maps any angle into $(-\pi, \pi]$.</p>
+<div class="co example" data-t="Worked example · slide 2">
+<p>Straight path along $+x$. The car is at $p = (5,\ 0.8)$ with heading 10°.</p>
+<ol class="steps">
+<li>Closest point: $s_* = 5$, $\mathbf{p}_r = (5, 0)$, $\psi_r = 0$, so $\mathbf{n}_r = (0, 1)$.</li>
+<li>$e_y = (0, 1) \cdot (0, 0.8) = 0.8$ m (left of the path); $e_\psi = 10° = 0.1745$ rad (turned to the left).</li>
+</ol>
+<p><b>Why the wrap matters:</b> with path heading $\psi_r = -179°$ and car heading $\psi = 179°$, the raw difference is 358°. Wrapped, it is $-2°$: the car is 2° clockwise of the path. Without the wrap, a controller would try to turn almost a full circle the wrong way.</p>
+</div>
+<div class="co pitfall"><p>The slide assumes the closest point is unique. Near the centre of a tight curve, or where a path doubles back, the closest point can jump to another stretch of road; implementations search only near the previous $s_*$.</p></div>
+
+<h2>Pure Pursuit I: the goal point in the car's frame</h2>
+<div class="co intuition" data-t="In plain English"><p>Pick a point on the path a fixed distance ahead (the <b>goal point</b>, at the <b>lookahead distance</b> $L_d$) and steer along the circular arc that takes the rear axle exactly there. The first step is to express the goal point in the car's own coordinates: how far ahead it is ($x_g$) and how far to the left ($y_g$).</p></div>
+$$\Delta X = X_g - x, \quad \Delta Y = Y_g - y, \qquad x_g = \Delta X\cos\psi + \Delta Y\sin\psi, \qquad y_g = -\Delta X\sin\psi + \Delta Y\cos\psi$$
+$$L_d^2 = x_g^2 + y_g^2, \qquad \alpha = \atantwo(y_g, x_g)$$
+<p>The two lines are a rotation by $-\psi$, the frame change of Lecture 2. $\alpha$ is the bearing of the goal point seen from the car. The goal point must lie ahead of the car ($x_g \gt 0$).</p>
+<div class="co example" data-t="Worked example · slide 3">
+<p>The car is at $(2, 1)$ with heading $\psi = 30°$; the goal point is $G = (6, 6)$.</p>
+<ol class="steps">
+<li>$\Delta X = 4$, $\Delta Y = 5$.</li>
+<li>$x_g = 4\cos 30° + 5\sin 30° = 3.464 + 2.5 = 5.964$ m; $\quad y_g = -4\sin 30° + 5\cos 30° = -2 + 4.330 = 2.330$ m.</li>
+<li>$L_d = \sqrt{5.964^2 + 2.330^2} = \sqrt{41} = 6.403$ m. Quick check: this equals $\sqrt{\Delta X^2 + \Delta Y^2}$, because a rotation does not change lengths.</li>
+<li>$\alpha = \atantwo(2.330,\ 5.964) = 21.3°$: the goal is 21.3° to the left of the heading.</li>
+</ol>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l10_pp_geometry.svg" alt="" style="max-width:76%"></div>
+<figcaption>The worked example: the goal point split into $x_g$ (along the heading) and $y_g$ (to the left), and the arc that Pure Pursuit drives.</figcaption></figure>
+
+<h2>Pure Pursuit II: from the arc to the steering angle</h2>
+<div class="co intuition" data-t="In plain English"><p>Draw the circle that passes through the car and the goal point and is tangent to the car's heading. Its centre lies on the car's $y_b$ axis. Simple geometry gives its curvature from $y_g$ and $L_d$ alone, and the bicycle model turns that curvature into a steering angle.</p></div>
+$$L_d = 2R\sin\alpha, \qquad y_g = L_d\sin\alpha \qquad\Rightarrow\qquad \kappa = \frac{1}{R} = \frac{2\sin\alpha}{L_d} = \frac{2y_g}{L_d^2}$$
+$$\kappa = \frac{\tan\delta}{L} \qquad\Rightarrow\qquad \delta = \arctan\!\left(\frac{2L\,y_g}{L_d^2}\right)$$
+<p>Why $L_d = 2R\sin\alpha$: the centre C, the car P and the goal G form an isosceles triangle ($CP = CG = R$). The tangent at P makes the angle $\alpha$ with the chord PG, so the chord subtends $2\alpha$ at the centre, and half the chord is $R\sin\alpha$. $R$ is signed: $y_g \gt 0$ means a left turn; $\alpha = 0$ means driving straight, with $\kappa = 0$.</p>
+<div class="co example" data-t="Worked example · slide 4 (continuing)">
+<ol class="steps">
+<li>$\kappa = \dfrac{2 \times 2.330}{41} = 0.1137$ 1/m, so $R = 8.80$ m. Check with the angle: $2\sin 21.34° / 6.403 = 0.1137$ ✓.</li>
+<li>$\delta = \arctan(2.7 \times 0.1137) = \arctan(0.307) = 17.1°$, to the left.</li>
+</ol>
+</div>
+<div class="co pitfall"><p>The car never drives the whole arc. The goal point is chosen again in every control cycle, so the arc is re-planned continuously, the same idea as the receding horizon of Lecture 9.</p></div>
+
+<h2>Pure Pursuit III: lookahead and the error response</h2>
+<div class="co intuition" data-t="In plain English"><p>For small errors near a straight path, Pure Pursuit turns the lateral error into a damped spring. The lookahead distance sets the stiffness. A short lookahead reacts quickly but is twitchy; a long one is smooth but slow, and on curves it cuts corners. Surprisingly, the damping ratio is always $1/\sqrt2$, whatever the speed and lookahead.</p></div>
+$$y_g \approx -e_y - L_d e_\psi, \qquad \delta \approx -\frac{2L}{L_d^2}e_y - \frac{2L}{L_d}e_\psi, \qquad \dot e_y \approx v e_\psi, \qquad \dot e_\psi \approx \frac{v}{L}\delta$$
+$$\ddot e_y + \frac{2v}{L_d}\dot e_y + \frac{2v^2}{L_d^2}e_y = 0, \qquad \omega_n = \frac{\sqrt2\,v}{L_d}, \qquad \zeta = \frac{1}{\sqrt2}$$
+<p>Where the first line comes from: on a straight path along $x$ the goal point lies about $L_d$ ahead, so $\Delta X \approx L_d$ and $\Delta Y = -e_y$; with a small heading $\psi = e_\psi$ the rotation gives $y_g \approx -e_y - L_d e_\psi$. Then $\ddot e_y = v\dot e_\psi = \frac{v^2}{L}\delta$; substituting $\delta$, the wheelbase $L$ cancels and the second-order equation follows. Assumptions: constant positive $v$ and $L_d$, small errors and steering angle.</p>
+<div class="co example" data-t="Worked example · slide 5 at v = 10 m/s">
+<table class="tbl compact">
+<tr><th>Lookahead $L_d$</th><th class="num">$\omega_n$ [rad/s]</th><th class="num">Settling $4/(\zeta\omega_n)$</th><th class="num">Steering per metre of $e_y$</th></tr>
+<tr><td>5 m</td><td class="num">2.83</td><td class="num">2 s</td><td class="num">0.216 rad/m</td></tr>
+<tr><td>10 m</td><td class="num">1.41</td><td class="num">4 s</td><td class="num">0.054 rad/m</td></tr>
+<tr><td>20 m</td><td class="num">0.71</td><td class="num">8 s</td><td class="num">0.0135 rad/m</td></tr>
+</table>
+<p>A 0.5 m offset with $L_d = 10$ m gives $\delta \approx -0.054 \times 0.5 = -0.027$ rad $= -1.5°$: a gentle steer to the right, back toward the path.</p>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l10_pp_response.svg" alt=""></div>
+<figcaption>Recovery from a 1 m offset. The full nonlinear simulation (dots) matches the linear model (lines). Shorter lookahead: faster, but with more steering effort. Every curve undershoots by the same 4.3 % ($e^{-\pi}$), because ζ is fixed.</figcaption></figure>
+<div class="co key"><p><b>Pure Pursuit settles within about four lookahead distances, at any speed.</b> The settling time is $4/(\zeta\omega_n) = 4L_d/v$, so the distance driven while settling is $v \cdot 4L_d / v = 4L_d$. That is why practical implementations make the lookahead grow with speed, $L_d = k v$ (with a minimum): the response time then stays the same.</p></div>
+<div class="co pitfall"><p>On curves, the goal point lies on the chord inside the bend, so the car cuts corners, more so with a longer lookahead. Too short a lookahead makes real cars oscillate, because steering lag and delay are not in the model.</p></div>
+
+<h2>Stanley I: errors at the front axle</h2>
+<div class="co intuition" data-t="In plain English"><p>Stanley measures the errors at the <b>front</b> axle, where the steering acts. The front wheel moves in the direction $\psi + \delta$, so the front-axle error changes at the front-wheel speed times the sine of the angle between the wheel's direction and the path.</p></div>
+$$x_f = x + L\cos\psi, \quad y_f = y + L\sin\psi, \qquad v_f = \frac{v}{\cos\delta}, \quad \psi_{vel,f} = \psi + \delta$$
+$$e_{\psi,f} = \wrap(\psi - \psi_{r,f}), \qquad \dot e_f = \frac{v}{\cos\delta}\sin(e_{\psi,f} + \delta)$$
+<ul>
+<li>$e_f$: lateral error of the front axle from its own closest path point (positive left); $e_{\psi,f}$: heading minus the path tangent at that point; $v$: rear-axle speed.</li>
+<li>Why $v_f = v/\cos\delta$: the front axle moves along the body at $v$ and sideways at $L\dot\psi = v\tan\delta$, so its speed is $v\sqrt{1 + \tan^2\delta} = v/\cos\delta$.</li>
+<li>Assumptions (slide 6): forward driving, no tyre side slip, $\left|\delta\right| \lt \pi/2$.</li>
+</ul>
+
+<h2>Stanley II: the control law and why the error decays</h2>
+<div class="co intuition" data-t="In plain English"><p>Stanley adds two corrections. First, turn the wheels to cancel the heading error ($-e_{\psi,f}$). Second, add an angle $\beta$ that points the wheel back toward the path: larger for a larger offset, smaller at higher speed. With these, the front-axle error can only shrink.</p></div>
+$$\delta_{cmd} = -e_{\psi,f} - \arctan\!\left(\frac{k e_f}{v}\right), \qquad \beta = \arctan\!\left(\frac{k e_f}{v}\right)$$
+$$\delta = \delta_{cmd}: \qquad \dot e_f = -\frac{k e_f}{\cos\delta\sqrt{1 + (k e_f/v)^2}}, \qquad e_f\dot e_f \lt 0 \ (e_f \ne 0), \qquad \text{small errors: } \dot e_f \approx -k e_f$$
+<p>Derivation: with the command, $e_{\psi,f} + \delta = -\beta$, and $\sin(-\beta) = -\frac{k e_f/v}{\sqrt{1 + (k e_f/v)^2}}$; multiply by $v/\cos\delta$. Because $\cos\delta \gt 0$ for $\left|\delta\right| \lt \pi/2$, the right side always has the opposite sign of $e_f$. For small errors $e_f(t) = e_f(0)\,e^{-kt}$: exponential decay with time constant $1/k$, independent of speed. Here $k \gt 0$ [1/s] and $v \gt 0$.</p>
+<div class="co example" data-t="Worked example · slides 6–7">
+<p>Straight path along $x$; rear axle at $(0, 0.3)$, heading 5°, $v = 5$ m/s, $k = 1$ 1/s, $L = 2.7$ m.</p>
+<ol class="steps">
+<li>Front axle: $(0 + 2.7\cos 5°,\ 0.3 + 2.7\sin 5°) = (2.690,\ 0.535)$, so $e_f = 0.535$ m and $e_{\psi,f} = 5°$.</li>
+<li>$\beta = \arctan(0.535/5) = \arctan(0.107) = 6.1°$.</li>
+<li>$\delta_{cmd} = -5° - 6.1° = -11.1°$ (steer right).</li>
+<li>$\dot e_f = -\dfrac{0.535}{\cos 11.1° \times \sqrt{1 + 0.107^2}} = -0.542$ m/s, close to the small-error value $-k e_f = -0.535$ m/s.</li>
+</ol>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l10_stanley.svg" alt=""></div>
+<figcaption>Stanley from a 1 m offset. The simulated error follows $e^{-kt}$ (dashed) closely; a larger $k$ is faster but asks for more steering at the start.</figcaption></figure>
+<div class="co key"><p>In Stanley, $k$ fixes the decay rate <b>in time</b>, at any speed. In Pure Pursuit with a fixed lookahead, the response speeds up with $v$, and it is the decay <b>distance</b> (about $4L_d$) that stays fixed.</p></div>
+<div class="co pitfall"><p>At low speed, $k e_f / v$ becomes large and the arctan asks for up to ±90°. Real implementations add a softening constant, $\arctan\big(k e_f / (k_s + v)\big)$ (beyond the slides). The exact result also assumes the steering neither saturates nor lags (slide 7's note).</p></div>
+
+<h2>Longitudinal dynamics: forces and slope</h2>
+<div class="co intuition" data-t="In plain English"><p>Along the road, the drive force pushes the car forward while the brake force, air drag, rolling resistance and the slope pull it back. Newton's law turns the net force into acceleration. On a hill, the slope is often the biggest term.</p></div>
+$$m\dot v = F_{drive} - F_{brake} - F_{res}, \qquad F_{res} = F_{aero} + F_{roll} + mg\sin\theta$$
+$$F_{aero} = \tfrac12\rho C_D A v^2, \qquad F_{roll} \approx C_{rr}\,mg\cos\theta$$
+<ul>
+<li>$F_{drive}$, $F_{brake}$: positive magnitudes of drive and brake force; $\theta$: slope, uphill positive.</li>
+<li>$\rho$: air density; $C_D$: drag coefficient; $A$: frontal area; $C_{rr}$: rolling-resistance coefficient. The model assumes no wind and forward driving.</li>
+</ul>
+<div class="co example" data-t="Worked example · slide 8 in numbers">
+<p>$m = 1500$ kg, $v = 20$ m/s, $\rho = 1.2$ kg/m³, $C_D = 0.3$, $A = 2.2$ m², $C_{rr} = 0.012$, 3° uphill:</p>
+<ol class="steps">
+<li>$F_{aero} = \frac12(1.2)(0.3)(2.2)(20^2) = 158.4$ N.</li>
+<li>$F_{roll} = 0.012 \times 1500 \times 9.81 \times \cos 3° = 176.3$ N.</li>
+<li>$F_{grade} = 1500 \times 9.81 \times \sin 3° = 770.1$ N, by far the largest.</li>
+<li>$F_{res} = 1104.9$ N, a power of $1104.9 \times 20 = 22.1$ kW. With $F_{drive} = 2000$ N: $\dot v = (2000 - 1104.9)/1500 = 0.60$ m/s².</li>
+</ol>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l10_forces.svg" alt="" style="max-width:86%"></div>
+<figcaption>Resistance of the example car on a 3° slope. Drag grows with $v^2$: 40 N at 10 m/s, 356 N at 30 m/s. Downhill, the grade term turns negative.</figcaption></figure>
+
+<h2>PI speed control: the desired acceleration</h2>
+<div class="co intuition" data-t="In plain English"><p>The speed controller asks for an acceleration. It feeds forward the planned acceleration $\dot v_{ref}$, adds a correction proportional to the speed error, and adds an integral term that slowly builds up to cancel any constant mismatch (slope, wind, model errors). The speed error then behaves like a damped spring that settles to zero.</p></div>
+$$e_v = v_{ref} - v, \qquad \dot z = e_v, \qquad a_{des} = \dot v_{ref} + k_p e_v + k_i z$$
+$$a = \dot v = a_{des} + d_a \quad\Rightarrow\quad \dot e_v = -k_p e_v - k_i z - d_a, \qquad \ddot e_v + k_p\dot e_v + k_i e_v = -\dot d_a$$
+<p>$d_a = a - a_{des}$ is the difference between the actual and the commanded acceleration, and $z$ is the integral of the speed error. If $d_a$ is constant, the right side is zero and $e_v \to 0$ for any $k_p, k_i \gt 0$. Comparing with $\ddot e + 2\zeta\omega_n\dot e + \omega_n^2 e = 0$: $\omega_n = \sqrt{k_i}$ and $\zeta = k_p / (2\sqrt{k_i})$.</p>
+<div class="co example" data-t="Extra example · tuning and a constant disturbance">
+<ol class="steps">
+<li>$k_p = 1$ 1/s, $k_i = 0.25$ 1/s²: $\omega_n = 0.5$ rad/s and $\zeta = 1/(2 \times 0.5) = 1$, critically damped.</li>
+<li>Suppose the car always accelerates 0.3 m/s² less than asked ($d_a = -0.3$). At steady state $\dot e_v = 0$ and $e_v = 0$, so $z = -d_a / k_i = 1.2$ m: the integrator holds exactly the extra command needed.</li>
+<li>Without the integral term, $\dot e_v = -k_p e_v - d_a$ settles at $e_v = -d_a/k_p = 0.3$ m/s: the car stays 0.3 m/s too slow.</li>
+</ol>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l10_pi.svg" alt="" style="max-width:84%"></div>
+<figcaption>A speed step with a constant disturbance: P control leaves a permanent error, PI removes it.</figcaption></figure>
+
+<h2>Actuator map: from acceleration to input</h2>
+<div class="co intuition" data-t="In plain English"><p>The controller computes an acceleration, but the car needs a pedal input $u$. A lookup table measured on a flat road gives the acceleration for each speed and input. Interpolate between the two nearest speeds, add the slope correction, then read the table backwards to find $u$.</p></div>
+$$\lambda = \frac{v - v_1}{v_2 - v_1}, \quad 0 \le \lambda \le 1, \qquad f(v, u) \approx (1 - \lambda)f(v_1, u) + \lambda f(v_2, u)$$
+$$a_{map} \approx a_{lim} + g\sin\theta, \qquad u_{cmd} = u_j + \frac{a_{map} - a_j}{a_{j+1} - a_j}(u_{j+1} - u_j)$$
+<p>First choose the operating region of the current-speed map (drive, coast or brake); within one region the acceleration increases with $u$, so the table can be inverted. $a_{map}$ is the acceleration to look up: on a slope you must ask the flat-road map for $g\sin\theta$ more than you want.</p>
+<div class="co example" data-t="Worked example · slide 10 with a small map">
+<p>Maps for $u = 0,\ 0.2,\ 0.4$: at $v_1 = 10$ m/s, $a = (-0.3,\ 0.8,\ 1.9)$; at $v_2 = 20$ m/s, $a = (-0.5,\ 0.5,\ 1.4)$ m/s².</p>
+<ol class="steps">
+<li>Current speed 14 m/s: $\lambda = (14 - 10)/(20 - 10) = 0.4$, interpolated map $a = (-0.38,\ 0.68,\ 1.70)$.</li>
+<li>Wanted $a_{lim} = 0.5$ m/s² on a 2° uphill: $a_{map} = 0.5 + 9.81\sin 2° = 0.842$ m/s².</li>
+<li>Bracket $0.68 \le 0.842 \le 1.70$ ($u$ between 0.2 and 0.4): $u_{cmd} = 0.2 + \frac{0.842 - 0.68}{1.70 - 0.68} \times 0.2 = 0.232$.</li>
+</ol>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l10_map.svg" alt="" style="max-width:84%"></div>
+<figcaption>Speed interpolation and inverse lookup on a five-point map (the first three points are the worked example).</figcaption></figure>
+<div class="co pitfall"><p>Slide 10's notes: add $g\sin\theta$ only for a flat-road map and only if the car does not compensate slope internally. Do not add drag and rolling resistance again, because a flat-road map already contains them at that speed. The dead zone (small inputs that do nothing) and requests outside the table need separate handling.</p></div>
+
+<h2>Online model estimation and inverse-model input</h2>
+<div class="co intuition" data-t="In plain English"><p>Instead of a fixed table, fit a simple model $a = bu - d_{eq}$ for the current operating region, keep correcting $b$ and $d_{eq}$ from the measured acceleration, and invert the model to get $u$. The correction is a gradient step on the squared prediction error, with a projection that keeps the estimates plausible (for example $\hat b$ positive).</p></div>
+$$a = bu - d_{eq} = \varphi^T\vartheta, \qquad \varphi = [u, -1]^T, \qquad \vartheta = [b, d_{eq}]^T$$
+$$\hat a = \varphi^T\hat\vartheta, \qquad \varepsilon = a_{meas} - \hat a, \qquad J = \varepsilon^2/2, \qquad \nabla J = -\varphi\varepsilon$$
+$$\hat\vartheta_{k+1} = \mathrm{Proj}_\Omega\big(\hat\vartheta_k + T_s\Gamma\varphi_k\varepsilon_k\big), \qquad u_{cmd} = \frac{a_{lim} + \hat d_{eq}}{\hat b}, \quad \hat b \ge b_{min} \gt 0$$
+<p>$b$: input sensitivity (the input sign is chosen so that $b \gt 0$); $d_{eq}$: equivalent deceleration (drag, rolling, slope lumped together); $\Gamma$: positive diagonal gain; $T_s$: update period; $\Omega$: allowed set. Updates pause during saturation, region switches and sensor faults, because then the data do not fit the model.</p>
+<div class="co example" data-t="Extra example · why the estimate matters, and one update">
+<p>True values $b = 2$, $d_{eq} = 0.4$; current estimates $\hat b = 1.5$, $\hat d_{eq} = 0.2$.</p>
+<ol class="steps">
+<li>For $a_{lim} = 1.0$ the right input is $(1 + 0.4)/2 = 0.7$. With the estimates, $u_{cmd} = (1 + 0.2)/1.5 = 0.8$, and the car accelerates at $2(0.8) - 0.4 = 1.2$ m/s², 20 % too much.</li>
+<li>One update at $u = 0.5$ with $T_s = 0.05$ s, $\Gamma = 2I$: $a_{meas} = 0.6$, $\hat a = 1.5(0.5) - 0.2 = 0.55$, $\varepsilon = 0.05$.</li>
+<li>Step: $0.05 \times 2 \times [0.5,\ -1]^T \times 0.05 = [0.0025,\ -0.005]^T$, so $\hat b = 1.5025$ and $\hat d_{eq} = 0.195$.</li>
+</ol>
+<p>Note that $\hat d_{eq}$ moved <em>away</em> from 0.4. A single step only reduces the prediction error at this $u$; over many steps with varied inputs, both estimates converge.</p>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l10_estimation.svg" alt=""></div>
+<figcaption>Left: inputs that jump between two levels identify both parameters. Right: a slowly varying input with fast adaptation keeps the prediction error small, but $\hat b$ and $\hat d_{eq}$ never settle on the true values.</figcaption></figure>
+<div class="co key"><p><b>A small prediction error does not mean correct parameters.</b> The estimates converge only if the input varies enough (persistent excitation), compared with how fast the estimator adapts.</p></div>
+
+<h2>Adaptive control from the tracking error</h2>
+<div class="co intuition" data-t="In plain English"><p>This is a separate speed controller, an alternative to PI plus a map. Its control law contains adjustable parameters, which it tunes directly from the speed error. A Lyapunov function made of the error energy and the parameter-error energy can never increase, which proves that the speed error goes to zero although $b$ and $d$ are unknown. The parameters themselves need not reach their true values.</p></div>
+$$\dot v = bu - d, \qquad e_v = v_{ref} - v, \qquad u = \hat\theta^T\varphi, \qquad \varphi = [\dot v_{ref},\ e_v,\ 1]^T$$
+$$\tilde\theta = \hat\theta - \theta^*, \qquad \theta^* = [1/b,\ k/b,\ d/b]^T, \qquad \dot e_v = -k e_v - b\tilde\theta^T\varphi, \qquad \dot{\hat\theta} = \Gamma\varphi e_v$$
+$$V = \frac{e_v^2}{2} + \frac{b}{2}\tilde\theta^T\Gamma^{-1}\tilde\theta, \qquad \dot V = -k e_v^2 \le 0 \qquad (k \gt 0,\ \Gamma = \Gamma^T \succ 0)$$
+<p>Why $\theta^*$: with perfect knowledge, $u^* = (\dot v_{ref} + k e_v + d)/b$ would give $\dot v = \dot v_{ref} + k e_v$, that is $\dot e_v = -k e_v$. $\theta^*$ is only used in the analysis; the controller never needs its value (slide 12's note). Derivative of $V$: $e_v\dot e_v + b\tilde\theta^T\Gamma^{-1}\dot{\hat\theta} = -k e_v^2 - b e_v\tilde\theta^T\varphi + b\tilde\theta^T\varphi e_v = -k e_v^2$; the update law was chosen precisely to cancel the unknown term.</p>
+<div class="co example" data-t="Extra example · a simulation of slide 12">
+<p>Plant $b = 0.5$, $d = 0.3$ (unknown to the controller); $k = 1$, $\Gamma = 0.5I$; start $\hat\theta = [1, 1, 0]$, $v = 8$ m/s; reference $v_{ref} = 10 + 2\sin 0.3t$. Then $\theta^* = [2, 2, 0.6]$.</p>
+<ol class="steps">
+<li>$V(0) = \frac12(2^2) + \frac{0.5}{2}\cdot\frac{1 + 1 + 0.36}{0.5} = 2 + 1.18 = 3.18$.</li>
+<li>Speed error: 2.0 m/s → −0.10 at 10 s → 0.011 at 60 s. $V$: 3.18 → 0.17 → 0.138, never increasing.</li>
+<li>$\hat\theta(60\text{ s}) = [1.95,\ 2.52,\ 0.59]$: $\hat\theta_1$ and $\hat\theta_3$ approach their ideal values, but $\hat\theta_2$ stays at 2.52. Its regressor is $e_v$ itself, which goes to zero, so the data stop carrying information about it.</li>
+</ol>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l10_mrac.svg" alt=""></div>
+<figcaption>The tracking error converges and $V$ only decreases, while one parameter settles at a wrong value. Both are consistent with $\dot V = -k e_v^2$.</figcaption></figure>
+<div class="co beyond"><p>$\dot V \le 0$ shows that $e_v$ and $\tilde\theta$ stay bounded; Barbalat's lemma then gives $e_v \to 0$. The proof assumes $b \gt 0$, constant $b$ and $d$, and an input that acts immediately. Saturation breaks it, which is why practical versions add projection or leakage to the update law.</p></div>
+
+<h2>Input limits, anti-windup and hill hold</h2>
+<div class="co intuition" data-t="In plain English"><p>Real actuators cannot produce any acceleration instantly. The command is clipped and rate-limited (a jerk limit) for comfort and safety, and the car follows it with a delay and a lag. When the command is clipped, a PI integrator keeps adding up an error it cannot remove and later overshoots (windup); anti-windup bleeds the clipped amount back into the integrator. At a standstill on a slope, the brakes must hold at least the downhill pull of gravity.</p></div>
+$$a_{min} \le a_{lim} \le a_{max}, \qquad \left|\dot a_{lim}\right| \le j_{max}, \qquad \tau_a\dot a + a = a_{lim}(t - T_d)$$
+$$\dot z = e_v + k_{aw}(a_{lim} - a_{des}), \qquad F_{hold,max} \ge \left|mg\sin\theta\right|$$
+<p>$\tau_a$: response time constant; $T_d$: delay; $j_{max}$: command jerk limit; $k_{aw} \gt 0$: anti-windup gain [s]. The anti-windup term acts on the integrator $z$ of the PI controller of slide 9, and only while the command is clipped ($a_{lim} \ne a_{des}$).</p>
+<div class="co example" data-t="Extra example · slide 13 in numbers">
+<ol class="steps">
+<li><b>Jerk limit:</b> going from 0 to 2 m/s² with $j_{max} = 2$ m/s³ takes at least 1 s.</li>
+<li><b>Anti-windup:</b> $e_v = 4$ m/s, $a_{des} = 3.5$, $a_{lim} = 2$ m/s², $k_{aw} = 0.5$ s: $\dot z = 4 + 0.5(2 - 3.5) = 3.25$ instead of 4.</li>
+<li><b>Hill hold:</b> a 10 % grade means $\tan\theta = 0.1$, so $\theta = 5.71°$; for $m = 1500$ kg the brakes must hold $1500 \times 9.81 \times \sin 5.71° = 1464$ N.</li>
+</ol>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l10_limits.svg" alt=""></div>
+<figcaption>Left: the clipped, jerk-limited command and the delayed, lagging response. Right: a speed step from 10 to 25 m/s with $a_{max} = 2$ m/s². Without anti-windup the speed overshoots to 33.6 m/s; with $k_{aw} = 1$ s, only to 26.2 m/s.</figcaption></figure>
+<div class="co pitfall"><p>Limiting the command alone does not guarantee that the actual acceleration and jerk stay within limits (slide 13's note): lag, delay and map errors sit between the command and the car. Also watch the grade unit: 10 % is $\tan\theta = 0.1$, not 10°.</p></div>
+
+<h2>Trajectory-tracking errors</h2>
+<div class="co intuition" data-t="In plain English"><p>A trajectory gives a reference pose for every instant. Compare the car with where the reference is <em>now</em>, and express the difference in the car's own frame: $e_x$ is how far the reference is ahead, $e_y$ how far it is to the left, and $e_\psi$ how much more it has turned.</p></div>
+$$q_r(t) = [x_r, y_r, \psi_r]^T, \qquad \Delta x = x_r - x, \quad \Delta y = y_r - y$$
+$$e_x = \Delta x\cos\psi + \Delta y\sin\psi, \qquad e_y = -\Delta x\sin\psi + \Delta y\cos\psi, \qquad e_\psi = \psi_r - \psi$$
+<div class="co pitfall" data-t="Watch out · the sign convention changed"><p>Here the errors are "reference minus actual": $e_y \gt 0$ means the <em>reference</em> is to the left of the car. On slide 2 they were "actual minus reference": $e_y \gt 0$ meant the <em>car</em> is to the left of the path. Do not mix the two definitions (slide 14's note). $e_\psi$ is kept as a continuous angle near zero.</p></div>
+<div class="co example" data-t="Worked example · slide 14">
+<p>Reference at $(10, 3)$ with heading 30°; car at $(8, 2)$ with heading 20°.</p>
+<ol class="steps">
+<li>$\Delta x = 2$, $\Delta y = 1$.</li>
+<li>$e_x = 2\cos 20° + \sin 20° = 1.879 + 0.342 = 2.221$ m: the reference is 2.2 m ahead, so the car is late.</li>
+<li>$e_y = -2\sin 20° + \cos 20° = -0.684 + 0.940 = 0.256$ m (to the left); $\ e_\psi = 10°$.</li>
+</ol>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l10_traj_error.svg" alt="" style="max-width:76%"></div>
+<figcaption>The worked example: the offset to the reference split along the car's axes.</figcaption></figure>
+
+<h2>Trajectory-tracking error dynamics</h2>
+<div class="co intuition" data-t="In plain English"><p>The errors change for two reasons. The reference and the car move with different velocities (translation). And the car rotates, so even a fixed offset gets new components in the car's turning frame (frame rotation).</p></div>
+$$\dot{\mathbf{e}}_p = \begin{bmatrix} \dot e_x \\ \dot e_y \end{bmatrix} = \underbrace{\begin{bmatrix} v_r\cos e_\psi - v \\ v_r\sin e_\psi \end{bmatrix}}_{\text{translation}} + \underbrace{\begin{bmatrix} \omega e_y \\ -\omega e_x \end{bmatrix}}_{\text{frame rotation}}, \qquad \dot e_\psi = \omega_r - \omega$$
+<div class="co example" data-t="Extra example · slide 15, continuing slide 14">
+<p>Reference speed and turn rate $v_r = 10$ m/s, $\omega_r = 0.1$ rad/s; car $v = 9$ m/s, $\omega = 0.12$ rad/s.</p>
+<ol class="steps">
+<li>$\dot e_x = 10\cos 10° - 9 + 0.12(0.256) = 9.848 - 9 + 0.031 = 0.879$ m/s: the car falls further behind.</li>
+<li>$\dot e_y = 10\sin 10° - 0.12(2.221) = 1.736 - 0.267 = 1.470$ m/s.</li>
+<li>$\dot e_\psi = 0.1 - 0.12 = -0.02$ rad/s: the car is turning faster than the reference, so the heading error shrinks.</li>
+</ol>
+</div>
+<div class="co beyond"><p>Derivation: $\mathbf{e}_p = R(\psi)^T(\mathbf{p}_r - \mathbf{p})$. Differentiating gives $\dot R^T(\mathbf{p}_r - \mathbf{p})$, the rotation term ($\omega$ times the error turned by −90°), plus $R^T(\dot{\mathbf{p}}_r - \dot{\mathbf{p}})$, the translation term.</p></div>
+
+<h2>Kanayama: velocity commands</h2>
+<div class="co intuition" data-t="In plain English"><p>Command a speed and a turn rate. Drive at the reference speed (projected onto your heading), plus extra if the reference is ahead ($k_x e_x$). Turn at the reference turn rate, plus extra to steer toward the reference if it is to the left ($k_y e_y$) and to match its heading ($k_\psi\sin e_\psi$). The steering corrections are scaled by the reference speed, so the gains mean the same at every speed.</p></div>
+$$v_c = v_r\cos e_\psi + k_x e_x, \qquad \omega_c = \omega_r + v_r\big(k_y e_y + k_\psi\sin e_\psi\big)$$
+$$v = v_c,\ \omega = \omega_c: \qquad \dot e_x = -k_x e_x + \omega_c e_y, \qquad \dot e_y = -\omega_c e_x + v_r\sin e_\psi, \qquad \dot e_\psi = -v_r\big(k_y e_y + k_\psi\sin e_\psi\big)$$
+<p>Gains: $k_x \gt 0$ [1/s], $k_y \gt 0$ [1/m²], $k_\psi \gt 0$ [1/m]. "Ideal tracking" means an inner-loop controller makes the actual speed and turn rate equal to the commands.</p>
+<div class="co example" data-t="Worked example · slide 16 with the slide-14 errors">
+<p>$e_x = 2.221$ m, $e_y = 0.256$ m, $e_\psi = 10°$; $v_r = 10$ m/s, $\omega_r = 0.1$ rad/s; $k_x = 1$, $k_y = 0.1$, $k_\psi = 0.6$.</p>
+<ol class="steps">
+<li>$v_c = 10\cos 10° + 1 \times 2.221 = 9.848 + 2.221 = 12.07$ m/s: speed up, because the car is behind.</li>
+<li>$\omega_c = 0.1 + 10\,(0.1 \times 0.256 + 0.6\sin 10°) = 0.1 + 10\,(0.0256 + 0.1042) = 1.398$ rad/s: turn left, toward the reference.</li>
+</ol>
+</div>
+
+<h2>Kanayama: stability and application to a car</h2>
+<div class="co intuition" data-t="In plain English"><p>A Lyapunov function of the position errors plus a heading term never increases, so the errors cannot grow; for a constant reference speed and turn rate, they converge to zero near the reference. A car cannot command a turn rate directly, though: $\omega_c$ and $v_c$ must become a steering angle, which works only while the requested curvature is within the steering limit.</p></div>
+$$V = \frac12\big(e_x^2 + e_y^2\big) + \frac{1 - \cos e_\psi}{k_y}, \qquad \dot V = -k_x e_x^2 - \frac{v_r k_\psi}{k_y}\sin^2 e_\psi \le 0$$
+$$\kappa_c = \frac{\omega_c}{v_c}, \qquad \delta_c = \arctan(L\kappa_c), \qquad \left|\kappa_c\right| \le \frac{\tan\delta_{max}}{L}, \qquad v_c \gt 0$$
+<p>Derivation: $\dot V = e_x\dot e_x + e_y\dot e_y + \frac{\sin e_\psi}{k_y}\dot e_\psi$. The $\omega_c e_x e_y$ terms cancel, and so do the $v_r e_y\sin e_\psi$ terms, leaving the two negative terms. $\dot V$ contains no $e_y$, so it is only negative <em>semi</em>definite. The slide's invariant-set check (LaSalle) closes the gap: if $e_x \equiv 0$ and $\sin e_\psi \equiv 0$, the dynamics force $e_y = 0$ (because $v_r \gt 0$). The result is local asymptotic convergence near zero error, under positive gains and $v = v_c$, $\omega = \omega_c$.</p>
+<div class="co example" data-t="Worked example · slide 17 at the slide-14 state">
+<ol class="steps">
+<li>$V = \frac12(2.221^2 + 0.256^2) + \frac{1 - \cos 10°}{0.1} = 2.500 + 0.152 = 2.652$.</li>
+<li>$\dot V = -1 \times 2.221^2 - \frac{10 \times 0.6}{0.1}\sin^2 10° = -4.934 - 1.809 = -6.744$: decreasing.</li>
+<li>For the car ($L = 2.7$ m, $\delta_{max} = 35°$): $\kappa_c = 1.398/12.07 = 0.116$ 1/m, $\delta_c = \arctan(2.7 \times 0.116) = 17.4°$. The limit is $\tan 35°/2.7 = 0.259$ 1/m, so the command is feasible.</li>
+</ol>
+</div>
+<div class="co example split" data-t="Extra example · when the steering saturates">
+<p>Reference driving along the $x$ axis at 4 m/s from the origin; car at $(0, -4)$ with heading −30°; $k_x = 0.8$, $k_y = 0.1$, $k_\psi = 0.6$.</p>
+<ol class="steps">
+<li>Errors: $\Delta x = 0$, $\Delta y = 4$, so $e_x = 4\sin(-30°) = -2$ m, $e_y = 4\cos(-30°) = 3.46$ m, $e_\psi = 30°$, and $V(0) = 9.34$.</li>
+<li>Commands: $v_c = 4\cos 30° - 0.8 \times 2 = 1.864$ m/s, $\omega_c = 4\,(0.346 + 0.300) = 2.586$ rad/s, so $\kappa_c = 1.387$ 1/m ($R = 0.72$ m).</li>
+<li>That is more than five times the limit of 0.259 1/m: the car can turn at only $\omega = 1.864 \times 0.259 = 0.483$ rad/s.</li>
+</ol>
+<p>In the simulation below the steering stays saturated for 0.78 s, and during that time $V$ <em>rises</em> from 9.34 to 10.40. The Lyapunov guarantee does not hold while the commanded curvature cannot be realised (slide 17's note). Here the controller recovers once the steering leaves the limit, but in general nothing guarantees that.</p>
+</div>
+<figure class="fig"><div class="panel"><img src="fig/l10_kanayama.svg" alt=""></div>
+<figcaption>Kanayama tracking a straight reference. Top: the ideal path and the steering-limited car. Bottom: the errors and $V$ for the ideal case, and $V$ for the steering-limited car (dashed), which rises while the steering is saturated.</figcaption></figure>
+
+<h2>Choosing a controller</h2>
+<table class="tbl compact" style="font-size:.84em">
+<tr><th style="width:17%">Controller</th><th style="width:18%">Tracks · uses</th><th>Strengths</th><th>Weaknesses</th></tr>
+<tr><td>Pure Pursuit (s3–5)</td><td>path · goal point $L_d$ ahead</td><td>simple and smooth, one tuning knob, settles in about $4L_d$</td><td>cuts corners on curves; lookahead trade-off</td></tr>
+<tr><td>Stanley (s6–7)</td><td>path · $e_f$, $e_{\psi,f}$ at the front axle</td><td>error decays like $e^{-kt}$ at any speed; uses the heading error explicitly</td><td>very sensitive at low speed; needs the path heading; can be twitchy</td></tr>
+<tr><td>PI + actuator map (s9–10)</td><td>speed · $e_v$</td><td>removes constant errors; the map handles the nonlinear powertrain</td><td>needs a good map; integrator windup</td></tr>
+<tr><td>Online estimation (s11)</td><td>acceleration model · $\varepsilon$</td><td>adapts to load, slope and wear</td><td>needs excitation and pause rules</td></tr>
+<tr><td>Adaptive control (s12)</td><td>speed · $e_v$</td><td>proven convergence with unknown $b$, $d$</td><td>parameters may not converge; assumes instant, unlimited input</td></tr>
+<tr><td>Kanayama (s16–17)</td><td>trajectory · $e_x$, $e_y$, $e_\psi$</td><td>controls speed and steering together; Lyapunov proof</td><td>needs feasible curvature; proof assumes ideal velocity tracking</td></tr>
+</table>
+
+<h2>Formula sheet</h2>
+<div class="fsheet" style="font-size:.95em">
+  <div class="f"><div class="n">Bicycle model · curvature</div><div class="eq">$\dot x = v\cos\psi,\ \dot y = v\sin\psi,\ \dot\psi = \frac{v}{L}\tan\delta$<br>$\kappa = \tan\delta / L = \dot\psi / v,\ \ R = L / \tan\delta$</div></div>
+  <div class="f"><div class="n">Path errors</div><div class="eq">$e_y = \mathbf{n}_r^T(p - \mathbf{p}_r(s_*)),\ e_\psi = \wrap(\psi - \psi_r)$</div></div>
+  <div class="f"><div class="n">Goal in the car frame</div><div class="eq">$x_g = \Delta X\cos\psi + \Delta Y\sin\psi$<br>$y_g = -\Delta X\sin\psi + \Delta Y\cos\psi$</div></div>
+  <div class="f"><div class="n">Pure Pursuit</div><div class="eq">$\kappa = 2y_g / L_d^2 = 2\sin\alpha / L_d,\ \ \delta = \arctan(2Ly_g / L_d^2)$</div></div>
+  <div class="f"><div class="n">Lookahead response</div><div class="eq">$\omega_n = \sqrt2\,v / L_d,\ \zeta = 1/\sqrt2$; settles in about $4L_d$</div></div>
+  <div class="f"><div class="n">Stanley · front axle</div><div class="eq">$\delta = -e_{\psi,f} - \arctan(k e_f / v),\ \ \dot e_f \approx -k e_f$<br>$v_f = v / \cos\delta,\ \ \dot e_f = v_f\sin(e_{\psi,f} + \delta)$</div></div>
+  <div class="f"><div class="n">Forces</div><div class="eq">$m\dot v = F_{drive} - F_{brake} - F_{res}$<br>$F_{res} = \tfrac12\rho C_D A v^2 + C_{rr}mg\cos\theta + mg\sin\theta$</div></div>
+  <div class="f"><div class="n">PI speed control</div><div class="eq">$a_{des} = \dot v_{ref} + k_p e_v + k_i z$<br>$\omega_n = \sqrt{k_i},\ \ \zeta = k_p / (2\sqrt{k_i})$</div></div>
+  <div class="f"><div class="n">Actuator map</div><div class="eq">$\lambda = \frac{v - v_1}{v_2 - v_1},\ a_{map} = a_{lim} + g\sin\theta$, then invert in $u$</div></div>
+  <div class="f"><div class="n">Online estimation</div><div class="eq">$\hat\vartheta \leftarrow \mathrm{Proj}(\hat\vartheta + T_s\Gamma\varphi\varepsilon),\ u_{cmd} = (a_{lim} + \hat d_{eq}) / \hat b$</div></div>
+  <div class="f"><div class="n">Adaptive control</div><div class="eq">$u = \hat\theta^T\varphi,\ \dot{\hat\theta} = \Gamma\varphi e_v,\ \dot V = -k e_v^2$</div></div>
+  <div class="f"><div class="n">Limits · lag</div><div class="eq">$\left|\dot a_{lim}\right| \le j_{max},\ \ \tau_a\dot a + a = a_{lim}(t - T_d)$</div></div>
+  <div class="f"><div class="n">Anti-windup · hill hold</div><div class="eq">$\dot z = e_v + k_{aw}(a_{lim} - a_{des}),\ F_{hold} \ge \left|mg\sin\theta\right|$</div></div>
+  <div class="f"><div class="n">Trajectory errors</div><div class="eq">$e_x = \Delta x\cos\psi + \Delta y\sin\psi$<br>$e_y = -\Delta x\sin\psi + \Delta y\cos\psi,\ \ e_\psi = \psi_r - \psi$</div></div>
+  <div class="f"><div class="n">Error dynamics</div><div class="eq">$\dot e_x = v_r\cos e_\psi - v + \omega e_y$<br>$\dot e_y = v_r\sin e_\psi - \omega e_x,\ \ \dot e_\psi = \omega_r - \omega$</div></div>
+  <div class="f"><div class="n">Kanayama</div><div class="eq">$v_c = v_r\cos e_\psi + k_x e_x$<br>$\omega_c = \omega_r + v_r(k_y e_y + k_\psi\sin e_\psi)$</div></div>
+  <div class="f"><div class="n">Kanayama Lyapunov</div><div class="eq">$\dot V = -k_x e_x^2 - \frac{v_r k_\psi}{k_y}\sin^2 e_\psi \le 0$</div></div>
+  <div class="f"><div class="n">Feasibility</div><div class="eq">$\kappa_c = \omega_c / v_c,\ \ \delta_c = \arctan(L\kappa_c)$<br>$\left|\kappa_c\right| \le \tan\delta_{max} / L,\ \ v_c \gt 0$</div></div>
+</div>
+
+<div style="break-before: page"></div>
+<h2>Practice problems</h2>
+<p class="qblock-intro">New numbers, same ideas as the slides. Unless stated otherwise, $L = 2.7$ m and $g = 9.81$ m/s². Try each one on paper before reading the solution.</p>
+
+<div class="qa" data-type="apply" data-level="1">
+<div class="q"><p>A car with $L = 2.5$ m drives at 8 m/s with $\delta = 8°$. Find the yaw rate, the turning radius and the time for a 90° turn.</p></div>
+<div class="a">
+<p>$\tan 8° = 0.1405$. $\dot\psi = \frac{8}{2.5} \times 0.1405 = 0.450$ rad/s; $R = 2.5 / 0.1405 = 17.8$ m; $t_{90} = \frac{\pi/2}{0.450} = 3.49$ s.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="1">
+<div class="q"><p>The closest path point is $(3, 3)$, where the path heading is 45°. The car is at $(2.5, 4)$ with heading 60°. Find $e_y$ and $e_\psi$.</p></div>
+<div class="a">
+<p>$\mathbf{n}_r = (-\sin 45°, \cos 45°) = (-0.707,\ 0.707)$ and $p - \mathbf{p}_r = (-0.5,\ 1)$, so $e_y = 0.354 + 0.707 = 1.061$ m (left of the path). $e_\psi = \wrap(60° - 45°) = 15°$.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="1">
+<div class="q"><p>The car's heading is −170° and the path heading is 175°. What is $e_\psi$, and what goes wrong without the wrap?</p></div>
+<div class="a">
+<p>The raw difference is $-170° - 175° = -345°$; wrapped into $(-180°, 180°]$ it is $+15°$: the car is turned 15° counterclockwise from the path. Without the wrap, a controller would see a huge clockwise error and steer hard the wrong way, nearly a full circle.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>Pure Pursuit: the car is at the origin heading north (90°); the goal point is $(3, 8)$. Find $x_g$, $y_g$, $L_d$, $\alpha$, $\kappa$, $R$ and $\delta$.</p></div>
+<div class="a">
+<p>$\Delta X = 3$, $\Delta Y = 8$. $x_g = 3\cos 90° + 8\sin 90° = 8$; $y_g = -3\sin 90° + 8\cos 90° = -3$ (the goal is to the right). $L_d = \sqrt{73} = 8.544$ m; $\alpha = \atantwo(-3, 8) = -20.6°$.</p>
+<p>$\kappa = 2(-3)/73 = -0.0822$ 1/m, $R = -12.2$ m (a right turn); $\delta = \arctan(2.7 \times -0.0822) = -12.5°$.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>At 15 m/s you want the linearized Pure Pursuit response to have $\omega_n = 1$ rad/s. Which lookahead do you need, how long does it take to settle, and what is the damping ratio?</p></div>
+<div class="a">
+<p>$L_d = \sqrt2\,v / \omega_n = \sqrt2 \times 15 = 21.2$ m. Settling time $4/(\zeta\omega_n) = 4\sqrt2 = 5.66$ s, or about $4L_d = 85$ m of driving. The damping ratio is $1/\sqrt2$, as for every lookahead.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>With a fixed lookahead of 10 m, the speed doubles from 10 to 20 m/s. What happens to $\omega_n$, to $\zeta$, to the settling time and to the settling distance?</p></div>
+<div class="a">
+<p>$\omega_n = \sqrt2\,v/L_d$ doubles (1.41 → 2.83 rad/s); $\zeta$ stays $1/\sqrt2$; the settling time halves (4 s → 2 s); the settling distance stays $4L_d = 40$ m. In space, the response depends only on the lookahead. If you want the same response <em>time</em> at every speed, make $L_d$ proportional to $v$.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>Stanley with $k = 1.5$ 1/s at $v = 8$ m/s: the front axle is 0.4 m to the right of the path ($e_f = -0.4$) and $e_{\psi,f} = -3°$. Find $\delta_{cmd}$ and the approximate rate of change of $e_f$.</p></div>
+<div class="a">
+<p>$\delta_{cmd} = -(-3°) - \arctan\!\left(\frac{1.5 \times -0.4}{8}\right) = 3° + \arctan(0.075) = 3° + 4.3° = 7.3°$, to the left, back toward the path. $\dot e_f \approx -k e_f = +0.6$ m/s, so the error shrinks toward zero.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="2">
+<div class="q"><p>The same Stanley controller ($k = 1.5$) at 0.5 m/s with $e_f = 0.4$ m and no heading error. What steering does it ask for, and how would you fix the problem?</p></div>
+<div class="a">
+<p>$\arctan(1.5 \times 0.4 / 0.5) = \arctan(1.2) = 50.2°$, well beyond a typical ±35° limit, so the steering saturates and the exact error result no longer applies. At low speed the $v$ in the denominator makes the correction explode. The usual fix is a softening constant, $\arctan\big(k e_f / (k_s + v)\big)$, or switching to a low-speed mode.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>$m = 1800$ kg, $C_D A = 0.75$ m², $\rho = 1.2$, $C_{rr} = 0.01$, $v = 25$ m/s, going down a 2° slope. Find the total resistance. What must the powertrain do to hold the speed?</p></div>
+<div class="a">
+<p>$F_{aero} = \frac12(1.2)(0.75)(625) = 281.3$ N; $F_{roll} = 0.01 \times 1800 \times 9.81 \times \cos 2° = 176.5$ N; $F_{grade} = 1800 \times 9.81 \times \sin(-2°) = -616.3$ N. So $F_{res} = -158.5$ N: gravity pushes harder than drag and rolling hold back, and the car would speed up. Holding 25 m/s needs about 158.5 N of braking (or engine braking).</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>Choose PI gains for $\omega_n = 0.8$ rad/s and $\zeta = 0.9$. With P control only (same $k_p$), what speed error remains if the car always accelerates 0.2 m/s² less than commanded?</p></div>
+<div class="a">
+<p>$k_i = \omega_n^2 = 0.64$ 1/s² and $k_p = 2\zeta\omega_n = 1.44$ 1/s. With P only, $e_v = -d_a / k_p = 0.2 / 1.44 = 0.139$ m/s. The integral term removes this error.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>The interpolated map at the current speed is $u = (0,\ 0.25,\ 0.5)$ → $a = (-0.4,\ 0.9,\ 2.1)$ m/s². Find $u_{cmd}$ for $a_{lim} = 1.2$ m/s² on a 3° downhill. Also: which $\lambda$ interpolates between maps at 15 and 25 m/s when driving at 17 m/s?</p></div>
+<div class="a">
+<p>Downhill $\theta = -3°$: $a_{map} = 1.2 + 9.81\sin(-3°) = 1.2 - 0.513 = 0.687$ m/s², because gravity already helps. Bracket $-0.4 \le 0.687 \le 0.9$: $u_{cmd} = 0 + \frac{0.687 + 0.4}{0.9 + 0.4} \times 0.25 = 0.209$.</p>
+<p>$\lambda = (17 - 15)/(25 - 15) = 0.2$.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>Online estimation with $\hat b = 1.8$, $\hat d_{eq} = 0.5$, $T_s = 0.1$ s and $\Gamma = I$. At $u = 0.6$ the measured acceleration is 0.9 m/s². Do one update, then compute $u_{cmd}$ for $a_{lim} = 1.0$.</p></div>
+<div class="a">
+<p>$\hat a = 1.8(0.6) - 0.5 = 0.58$, $\varepsilon = 0.9 - 0.58 = 0.32$. Step $= 0.1 \times [0.6,\ -1]^T \times 0.32 = [0.0192,\ -0.032]^T$, so $\hat b = 1.819$ and $\hat d_{eq} = 0.468$. Then $u_{cmd} = (1.0 + 0.468)/1.819 = 0.807$.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>In the adaptive controller of slide 12, $\dot V = -k e_v^2$. What exactly does that guarantee, and why may $\hat\theta$ never reach $\theta^*$?</p></div>
+<div class="a">
+<p>$V$ never increases, so $e_v$ and $\tilde\theta$ stay bounded, and with a standard argument (Barbalat) $e_v \to 0$. Nothing forces $\tilde\theta \to 0$: $\dot V$ contains no $\tilde\theta$ term. Once $e_v \approx 0$, the update $\dot{\hat\theta} = \Gamma\varphi e_v$ stops, wherever $\hat\theta$ happens to be. The parameters converge only if the reference is rich enough (persistent excitation). In particular, $\hat\theta_2$ multiplies $e_v$ itself, which carries no information once the error is small.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="1">
+<div class="q"><p>The speed error is 5 m/s, the PI controller asks for $a_{des} = 4.0$ m/s², but the limit gives $a_{lim} = 2.0$. With $k_{aw} = 0.8$ s, how fast does the integrator grow? What would happen without anti-windup?</p></div>
+<div class="a">
+<p>$\dot z = 5 + 0.8(2.0 - 4.0) = 3.4$ instead of 5. Without anti-windup the integrator keeps charging at the full error while the car accelerates at only 2 m/s²; when the speed reaches the reference, the large stored $z$ keeps the command high and the speed overshoots.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="1">
+<div class="q"><p>Which brake force must a 2000 kg car hold at a standstill on a 15 % grade?</p></div>
+<div class="a">
+<p>$\theta = \arctan 0.15 = 8.53°$, so $F_{hold} \ge 2000 \times 9.81 \times \sin 8.53° = 2910$ N. (Taking θ = 15° by mistake would give 5078 N.)</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="apply" data-level="2">
+<div class="q"><p>The reference is at $(5, 5)$ with heading 90°; the car is at $(4, 3)$ with heading 80°. Find $e_x$, $e_y$ and $e_\psi$ and describe where the reference is.</p></div>
+<div class="a">
+<p>$\Delta x = 1$, $\Delta y = 2$. $e_x = \cos 80° + 2\sin 80° = 0.174 + 1.970 = 2.143$ m; $e_y = -\sin 80° + 2\cos 80° = -0.985 + 0.347 = -0.638$ m; $e_\psi = 10°$. The reference is 2.1 m ahead and 0.64 m to the <em>right</em> of the car, and has turned 10° further to the left.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="analyze" data-level="3">
+<div class="q"><p>Kanayama with $k_x = 0.5$, $k_y = 0.2$, $k_\psi = 1$, $v_r = 6$ m/s, $\omega_r = 0.2$ rad/s and errors $e_x = 1$ m, $e_y = -0.5$ m, $e_\psi = -10°$. Compute $v_c$, $\omega_c$, $\kappa_c$ and $\delta_c$. Is the command feasible with $\delta_{max} = 30°$?</p></div>
+<div class="a">
+<p>$v_c = 6\cos(-10°) + 0.5 = 6.409$ m/s; $\omega_c = 0.2 + 6\,(0.2 \times -0.5 + \sin(-10°)) = 0.2 + 6\,(-0.1 - 0.174) = -1.442$ rad/s.</p>
+<p>$\kappa_c = -1.442/6.409 = -0.225$ 1/m and $\delta_c = \arctan(2.7 \times -0.225) = -31.3°$. The limit is $\tan 30°/2.7 = 0.214$ 1/m, so the command is <b>not</b> feasible: the steering saturates at −30°, and while it does, the Lyapunov result of slide 17 does not apply. Lower gains, or a reference that starts closer to the car, avoid this.</p>
+</div>
+</div><!--/qa-->
+
+<div class="qa" data-type="concept" data-level="2">
+<div class="q"><p>Compare Pure Pursuit, Stanley and Kanayama: which point of the car does each use, which reference does it need, and how does it behave at low speed?</p></div>
+<div class="a">
+<p><b>Pure Pursuit</b> uses the rear axle and a goal point on a path; it needs only the path geometry. At low speed with a fixed lookahead it simply responds more slowly in time (it settles within about $4L_d$ of driving).</p>
+<p><b>Stanley</b> uses the front axle, the path and its heading. Its error decays at rate $k$ at any speed, but at very low speed the $\arctan(k e_f / v)$ term asks for huge steering angles.</p>
+<p><b>Kanayama</b> uses the rear-axle pose and a <em>trajectory</em> with timing: it corrects being late or early through $v_c$ as well as steering through $\omega_c$. Its corrections scale with $v_r$; at low speed its curvature command $\omega_c / v_c$ can exceed the steering limit, which voids the stability proof.</p>
+</div>
+</div><!--/qa-->
+</section>
